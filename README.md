@@ -28,8 +28,10 @@ Xray-core/sing-box 一键脚本快速安装
 
 ### 安装脚本版
 
+本 fork 的脚本版包含 sing-box Socks5/VPNGate 清单分流增强。
+
 ```
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh" && chmod 700 /root/install.sh && /root/install.sh
+wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/youshang8520/v2ray-agent/customize-singbox-socks-routing/install.sh" && chmod 700 /root/install.sh && /root/install.sh
 ```
 
 ### 使用
