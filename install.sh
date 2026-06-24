@@ -6276,9 +6276,9 @@ updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新v2ray-agent脚本"
     rm -rf /etc/v2ray-agent/install.sh
     if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+        wget -c -q -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/youshang8520/v2ray-agent/customize-singbox-socks-routing/install.sh"
     else
-        wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+        wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/youshang8520/v2ray-agent/customize-singbox-socks-routing/install.sh"
     fi
 
     sudo chmod 700 /etc/v2ray-agent/install.sh
@@ -6289,7 +6289,7 @@ updateV2RayAgent() {
     echoContent yellow " ---> 请手动执行[vasma]打开脚本"
     echoContent green " ---> 当前版本：${version}\n"
     echoContent yellow "如更新不成功，请手动执行下面命令\n"
-    echoContent skyBlue "wget -P /root -N --no-check-certificate https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent skyBlue "wget -P /root -N --no-check-certificate https://raw.githubusercontent.com/youshang8520/v2ray-agent/customize-singbox-socks-routing/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -7560,22 +7560,16 @@ socks5OutboundRoutingMenu() {
     echoContent skyBlue "\n功能 1/1 : Socks5出站"
     echoContent red "\n=============================================================="
 
-    echoContent yellow "1.安装Socks5出站[域名走Socks5]"
-    echoContent yellow "2.设置Socks5全局转发[原逻辑，会清理其他分流]"
+    echoContent skyBlue "分流模式：VPNGate清单走Socks5，其余流量IPv6优先直连，IPv4兜底"
+    echoContent yellow "1.分流Socks5"
+    echoContent yellow "2.Socks5全局转发"
     echoContent yellow "3.查看分流规则"
-    echoContent yellow "4.添加域名走Socks5规则[IP质量优先]"
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        echoContent yellow "5.启用VPNGate清单分流[清单走Socks5，其余IPv6优先直连]"
-        echoContent yellow "6.添加域名直连规则[速度优先]"
-        echoContent yellow "7.查看sing-box组合分流规则"
-        echoContent yellow "8.卸载sing-box组合分流规则"
-        echoContent yellow "9.维护VPNGate清单"
-    fi
+    echoContent yellow "4.卸载分流规则"
+    echoContent yellow "5.维护VPNGate清单"
     read -r -p "请选择:" selectType
     case ${selectType} in
     1)
-        setSocks5Outbound
-        setSocks5OutboundRouting
+        setSingBoxSocks5OutboundListRouting
         reloadCore
         socks5OutboundRoutingMenu
         ;;
@@ -7586,36 +7580,25 @@ socks5OutboundRoutingMenu() {
         socks5OutboundRoutingMenu
         ;;
     3)
-        showSingBoxRoutingRules socks5_01_outbound_route
+        if [[ -n "${singBoxConfigPath}" ]]; then
+            showSingBoxSocks5CustomRouting
+        else
+            showSingBoxRoutingRules socks5_01_outbound_route
+        fi
         showXrayRoutingRules socks5_outbound
         socks5OutboundRoutingMenu
         ;;
     4)
-        setSocks5OutboundRouting addRules
+        removeSocks5OutboundRouting
         reloadCore
         socks5OutboundRoutingMenu
         ;;
     5)
-        setSingBoxSocks5OutboundListRouting
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    6)
-        setSingBoxSocks5OutboundDirectRouting
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    7)
-        showSingBoxSocks5CustomRouting
-        socks5OutboundRoutingMenu
-        ;;
-    8)
-        removeSingBoxSocks5CustomRouting
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    9)
         manageSingBoxSocks5RoutingList
+        socks5OutboundRoutingMenu
+        ;;
+    *)
+        echoContent red " ---> 选择错误"
         socks5OutboundRoutingMenu
         ;;
     esac
@@ -7754,6 +7737,37 @@ removeSocks5Routing() {
     fi
     echoContent green " ---> 卸载完毕"
     reloadCore
+}
+
+# 卸载Socks5出站和分流规则，包含清单、手动域名、全局Socks5出站
+removeSocks5OutboundRouting() {
+    readInstallType
+    echoContent red "=============================================================="
+    echoContent yellow "# 将卸载Socks5出站、VPNGate清单、手动域名分流和全局Socks5出站规则"
+    read -r -p "是否确认卸载？[y/n]:" unInstallSocks5OutboundStatus
+    if [[ "${unInstallSocks5OutboundStatus}" != "y" ]]; then
+        echoContent green " ---> 放弃卸载"
+        return
+    fi
+
+    if [[ "${coreInstallType}" == "1" ]]; then
+        removeXrayOutbound socks5_outbound
+        unInstallRouting socks5_outbound outboundTag
+        addXrayOutbound z_direct_outbound
+    fi
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        removeSingBoxConfig "socks5_outbound"
+        removeSingBoxConfig "socks5_01_outbound_route"
+        removeSingBoxConfig "00_socks5_vpngate_list_route"
+        removeSingBoxConfig "10_socks5_direct_route"
+        removeSingBoxConfig "00_socks5_direct_route"
+        removeSingBoxConfig "zz_socks5_ipv4_global_route"
+        rm -f "$(singBoxSocks5RoutingListFile)" >/dev/null 2>&1
+        addSingBoxOutbound "01_direct_outbound"
+    fi
+
+    echoContent green " ---> 已卸载Socks5出站和分流规则"
 }
 # Socks5入站
 setSocks5Inbound() {
