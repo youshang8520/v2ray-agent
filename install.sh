@@ -7571,9 +7571,10 @@ socks5Routing() {
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
     echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000#heading-5 \n"
 
-    echoContent yellow "1.Socks5出站"
-    echoContent yellow "2.Socks5入站"
-    echoContent yellow "3.卸载"
+    echoContent yellow "1.单 Socks5 出站"
+    echoContent yellow "2.多 Socks5 出站"
+    echoContent yellow "3.Socks5入站"
+    echoContent yellow "4.卸载"
     read -r -p "请选择:" selectType
 
     case ${selectType} in
@@ -7581,12 +7582,131 @@ socks5Routing() {
         socks5OutboundRoutingMenu
         ;;
     2)
-        socks5InboundRoutingMenu
+        socks5MultiOutboundRoutingMenu
         ;;
     3)
+        socks5InboundRoutingMenu
+        ;;
+    4)
         removeSocks5Routing
         ;;
+    *)
+        echoContent red " ---> 选择错误"
+        socks5Routing
+        ;;
     esac
+}
+
+# 多 Socks5 索引文件
+socks5MultiIndexFile() {
+    echo "/etc/v2ray-agent/socks5_outbounds.json"
+}
+
+# 多 Socks5 清单目录
+socks5MultiListDir() {
+    echo "/etc/v2ray-agent/socks5_routing_lists"
+}
+
+# 初始化多 Socks5 存储
+initSocks5MultiStorage() {
+    mkdir -p "$(socks5MultiListDir)"
+    if [[ ! -f "$(socks5MultiIndexFile)" ]]; then
+        echo "[]" >"$(socks5MultiIndexFile)"
+    fi
+}
+
+# 校验多 Socks5 代理别名
+validateSocks5Alias() {
+    local alias=$1
+    if [[ -z "${alias}" ]]; then
+        echoContent red " ---> 代理别名不可为空"
+        return 1
+    fi
+    if ! echo "${alias}" | grep -Eq '^[a-zA-Z0-9_-]+$'; then
+        echoContent red " ---> 代理别名只能包含英文、数字、下划线、短横线"
+        return 1
+    fi
+    return 0
+}
+
+# 多 Socks5 出站菜单
+socks5MultiOutboundRoutingMenu() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 多 Socks5 出站仅支持 sing-box"
+        socks5Routing
+        return
+    fi
+    initSocks5MultiStorage
+
+    echoContent skyBlue "\n功能 1/1 : 多 Socks5 出站"
+    echoContent red "\n=============================================================="
+    echoContent yellow "1.查看代理列表"
+    echoContent yellow "2.添加代理"
+    echoContent yellow "3.编辑代理"
+    echoContent yellow "4.删除代理"
+    echoContent yellow "5.管理代理清单"
+    echoContent yellow "6.查看分流规则"
+    echoContent yellow "7.刷新规则"
+    echoContent yellow "8.检查清单冲突"
+    echoContent yellow "9.卸载多 Socks5 配置"
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        showSocks5MultiOutbounds
+        socks5MultiOutboundRoutingMenu
+        ;;
+    2)
+        echoContent yellow " ---> 多 Socks5 添加代理功能将在下一阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    3)
+        echoContent yellow " ---> 多 Socks5 编辑代理功能将在下一阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    4)
+        echoContent yellow " ---> 多 Socks5 删除代理功能将在下一阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    5)
+        echoContent yellow " ---> 多 Socks5 代理清单管理将在后续阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    6)
+        showSocks5MultiOutbounds
+        socks5MultiOutboundRoutingMenu
+        ;;
+    7)
+        echoContent yellow " ---> 多 Socks5 刷新规则将在后续阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    8)
+        echoContent yellow " ---> 多 Socks5 清单冲突检查将在后续阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    9)
+        echoContent yellow " ---> 多 Socks5 卸载功能将在后续阶段实现"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    *)
+        echoContent red " ---> 选择错误"
+        socks5MultiOutboundRoutingMenu
+        ;;
+    esac
+}
+
+# 查看多 Socks5 代理列表
+showSocks5MultiOutbounds() {
+    initSocks5MultiStorage
+    local indexFile=
+    indexFile=$(socks5MultiIndexFile)
+    echoContent yellow "\n多 Socks5 代理索引：${indexFile}"
+    if [[ "$(jq '.|length' "${indexFile}")" == "0" ]]; then
+        echoContent yellow " ---> 暂无多 Socks5 代理"
+        return
+    fi
+    jq -r 'to_entries[] | "\(.key + 1). \(.value.alias)  \(.value.server):\(.value.server_port)  tag=\(.value.tag)  enabled=\(.value.enabled)  priority=\(.value.priority)"' "${indexFile}"
 }
 # Socks5入站菜单
 socks5InboundRoutingMenu() {
