@@ -8219,6 +8219,7 @@ buildSingBoxSocks5RoutingListRule() {
     local listFile=$1
     local routingName="socks5_vpngate_list"
     local domainRules=[]
+    local domainSuffix=[]
     local ruleSet=[]
     local ruleSetTag=[]
     local ipCidrs=[]
@@ -8237,16 +8238,14 @@ buildSingBoxSocks5RoutingListRule() {
         elif echo "${normalizedLine}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$|:'; then
             ipCidrs=$(echo "${ipCidrs}" | jq -r --arg cidr "${normalizedLine}" '. += [$cidr]')
         elif isDomainFormat "${normalizedLine}"; then
-            local escapedDomain=
-            escapedDomain=${normalizedLine//./\\.}
-            domainRules=$(echo "${domainRules}" | jq -r --arg reg ".*${escapedDomain}.*" '. += [$reg]')
+            domainSuffix=$(echo "${domainSuffix}" | jq -r --arg domain "${normalizedLine}" '. += [$domain]')
         else
             local matchedRuleName=
             matchedRuleName=$(getDLCGeositeName "${normalizedLine}" "/etc/v2ray-agent/sing-box")
             if [[ -n "${matchedRuleName}" ]]; then
                 ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${matchedRuleName}_${routingName}\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${matchedRuleName}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
             else
-                domainRules=$(echo "${domainRules}" | jq -r --arg reg "^([a-zA-Z0-9_-]+\\.)*${normalizedLine//./\\.}" '. += [$reg]')
+                domainSuffix=$(echo "${domainSuffix}" | jq -r --arg domain "${normalizedLine}" '. += [$domain]')
             fi
         fi
     done <"${listFile}"
@@ -8254,7 +8253,7 @@ buildSingBoxSocks5RoutingListRule() {
     if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
         ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
     fi
-    echo "{\"domainRules\":${domainRules},\"ruleSet\":${ruleSet},\"ruleSetTag\":${ruleSetTag},\"ipCidrs\":${ipCidrs}}"
+    echo "{\"domainRules\":${domainRules},\"domainSuffix\":${domainSuffix},\"ruleSet\":${ruleSet},\"ruleSetTag\":${ruleSetTag},\"ipCidrs\":${ipCidrs}}"
 }
 
 # sing-box VPNGate清单分流：清单走Socks5，其余IPv6优先直连回落IPv4
@@ -8301,15 +8300,17 @@ setSingBoxSocks5OutboundListRouting() {
     local rules=
     rules=$(buildSingBoxSocks5RoutingListRule "${listFile}")
     local domainRules=
+    local domainSuffix=
     local ruleSet=
     local ruleSetTag=
     local ipCidrs=
     domainRules=$(echo "${rules}" | jq .domainRules)
+    domainSuffix=$(echo "${rules}" | jq .domainSuffix)
     ruleSet=$(echo "${rules}" | jq .ruleSet)
     ruleSetTag=$(echo "${rules}" | jq .ruleSetTag)
     ipCidrs=$(echo "${rules}" | jq .ipCidrs)
 
-    if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
+    if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
         echoContent red " ---> 清单为空，请先维护清单"
         exit 0
     fi
@@ -8319,7 +8320,42 @@ setSingBoxSocks5OutboundListRouting() {
   "route": {
     "rules": [
       {
+        "action": "sniff",
+        "timeout": "1s"
+      },
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "protocol": "stun"
+          },
+          {
+            "domain_keyword": [
+              "stun",
+              "turn"
+            ]
+          },
+          {
+            "domain_regex": [
+              "(^|\\\\.)stun\\\\.",
+              "(^|\\\\.)turn\\\\."
+            ]
+          },
+          {
+            "network": "udp",
+            "port": [
+              3478,
+              5349
+            ]
+          }
+        ],
+        "action": "reject",
+        "method": "drop"
+      },
+      {
         "rule_set": ${ruleSetTag},
+        "domain_suffix": ${domainSuffix},
         "domain_regex": ${domainRules},
         "ip_cidr": ${ipCidrs},
         "outbound": "socks5_outbound"
@@ -8332,9 +8368,10 @@ setSingBoxSocks5OutboundListRouting() {
 EOF
 
     jq 'if .route.rule_set == [] then del(.route.rule_set) else . end
-        | if .route.rules[0].rule_set == [] then del(.route.rules[0].rule_set) else . end
-        | if .route.rules[0].domain_regex == [] then del(.route.rules[0].domain_regex) else . end
-        | if .route.rules[0].ip_cidr == [] then del(.route.rules[0].ip_cidr) else . end' \
+        | (.route.rules[] |= (if .rule_set? == [] then del(.rule_set) else . end))
+        | (.route.rules[] |= (if .domain_suffix? == [] then del(.domain_suffix) else . end))
+        | (.route.rules[] |= (if .domain_regex? == [] then del(.domain_regex) else . end))
+        | (.route.rules[] |= (if .ip_cidr? == [] then del(.ip_cidr) else . end))' \
         "${singBoxConfigPath}00_socks5_vpngate_list_route.json" >"${singBoxConfigPath}00_socks5_vpngate_list_route_tmp.json" && mv "${singBoxConfigPath}00_socks5_vpngate_list_route_tmp.json" "${singBoxConfigPath}00_socks5_vpngate_list_route.json"
 
     echoContent green " ---> 已设置：清单走Socks5，清单外IPv6优先直连并回落IPv4"
