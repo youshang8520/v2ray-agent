@@ -7560,10 +7560,16 @@ socks5OutboundRoutingMenu() {
     echoContent skyBlue "\n功能 1/1 : Socks5出站"
     echoContent red "\n=============================================================="
 
-    echoContent yellow "1.安装Socks5出站"
-    echoContent yellow "2.设置Socks5全局转发"
+    echoContent yellow "1.安装Socks5出站[域名走Socks5]"
+    echoContent yellow "2.设置Socks5全局转发[原逻辑，会清理其他分流]"
     echoContent yellow "3.查看分流规则"
-    echoContent yellow "4.添加分流规则"
+    echoContent yellow "4.添加域名走Socks5规则[IP质量优先]"
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        echoContent yellow "5.设置IPv4兜底走Socks5、IPv6直连[组合模式]"
+        echoContent yellow "6.添加域名直连规则[速度优先]"
+        echoContent yellow "7.查看sing-box组合分流规则"
+        echoContent yellow "8.卸载sing-box组合分流规则"
+    fi
     read -r -p "请选择:" selectType
     case ${selectType} in
     1)
@@ -7585,6 +7591,25 @@ socks5OutboundRoutingMenu() {
         ;;
     4)
         setSocks5OutboundRouting addRules
+        reloadCore
+        socks5OutboundRoutingMenu
+        ;;
+    5)
+        setSingBoxSocks5OutboundIPv4Global
+        reloadCore
+        socks5OutboundRoutingMenu
+        ;;
+    6)
+        setSingBoxSocks5OutboundDirectRouting
+        reloadCore
+        socks5OutboundRoutingMenu
+        ;;
+    7)
+        showSingBoxSocks5CustomRouting
+        socks5OutboundRoutingMenu
+        ;;
+    8)
+        removeSingBoxSocks5CustomRouting
         reloadCore
         socks5OutboundRoutingMenu
         ;;
@@ -7684,6 +7709,7 @@ removeSocks5Routing() {
         if [[ -n "${singBoxConfigPath}" ]]; then
             removeSingBoxConfig socks5_outbound
             removeSingBoxConfig socks5_01_outbound_route
+            removeSingBoxSocks5CustomRouting noReload
             addSingBoxOutbound 01_direct_outbound
         fi
 
@@ -7711,6 +7737,7 @@ removeSocks5Routing() {
             removeSingBoxConfig sniff_socks5_inbound
             removeSingBoxConfig "strategy_ipv4_only_socks5_inbound"
             removeSingBoxConfig "strategy_ipv6_only_socks5_inbound"
+            removeSingBoxSocks5CustomRouting noReload
 
             addSingBoxOutbound 01_direct_outbound
         fi
@@ -7906,6 +7933,7 @@ EOF
 setSocks5Outbound() {
 
     echoContent yellow "\n==================== 配置 Socks5 出站（转发机、代理机） =====================\n"
+    echoContent yellow "# 用户名和密码都留空时，将生成无认证 Socks5 出站，例如本机 AimiliVPN 127.0.0.1:7928"
     echo
     read -r -p "请输入落地机IP地址:" socks5RoutingOutboundIP
     if [[ -z "${socks5RoutingOutboundIP}" ]]; then
@@ -7919,15 +7947,15 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
-    read -r -p "请输入用户名:" socks5RoutingOutboundUserName
-    if [[ -z "${socks5RoutingOutboundUserName}" ]]; then
-        echoContent red " ---> 用户名不可为空"
+    read -r -p "请输入用户名[回车无认证]:" socks5RoutingOutboundUserName
+    echo
+    read -r -p "请输入用户密码[回车无认证]:" socks5RoutingOutboundPassword
+    if [[ -z "${socks5RoutingOutboundUserName}" && -n "${socks5RoutingOutboundPassword}" ]] || [[ -n "${socks5RoutingOutboundUserName}" && -z "${socks5RoutingOutboundPassword}" ]]; then
+        echoContent red " ---> 用户名和密码必须同时填写，或同时留空"
         exit 0
     fi
-    echo
-    read -r -p "请输入用户密码:" socks5RoutingOutboundPassword
-    if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
-        echoContent red " ---> 用户密码不可为空"
+    if [[ "${coreInstallType}" == "1" && -z "${socks5RoutingOutboundUserName}" ]]; then
+        echoContent red " ---> Xray-core 暂不支持此菜单生成无认证 Socks5，请切换 sing-box 或手动配置"
         exit 0
     fi
     echo
@@ -7940,13 +7968,16 @@ setSocks5Outbound() {
           "tag":"socks5_outbound",
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
-          "version": "5",
-          "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"
+          "version": "5"
         }
     ]
 }
 EOF
+        if [[ -n "${socks5RoutingOutboundUserName}" ]]; then
+            local socks5OutboundConfig=
+            socks5OutboundConfig=$(jq '.outbounds[0].username="'"${socks5RoutingOutboundUserName}"'" | .outbounds[0].password="'"${socks5RoutingOutboundPassword}"'"' "${singBoxConfigPath}socks5_outbound.json")
+            echo "${socks5OutboundConfig}" | jq . >"${singBoxConfigPath}socks5_outbound.json"
+        fi
     fi
     if [[ "${coreInstallType}" == "1" ]]; then
         addXrayOutbound socks5_outbound
@@ -7956,8 +7987,8 @@ EOF
 # socks5 outbound routing规则
 setSocks5OutboundRouting() {
 
-    if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_01_outbound_route.json" && ! -f "${configPath}09_routing.json" ]]; then
-        echoContent red " ---> 请安装出站分流后再添加分流规则"
+    if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_outbound.json" && ! -f "${configPath}socks5_outbound.json" ]]; then
+        echoContent red " ---> 请安装Socks5出站后再添加分流规则"
         exit 0
     fi
 
@@ -8000,6 +8031,137 @@ EOF
         fi
         routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
         echo "${routing}" | jq . >${configPath}09_routing.json
+    fi
+}
+
+# sing-box Socks5 IPv4兜底出站，IPv6直连
+setSingBoxSocks5OutboundIPv4Global() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 此功能仅支持 sing-box"
+        exit 0
+    fi
+
+    if [[ ! -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
+        echoContent yellow " ---> 未检测到Socks5出站配置，是否现在配置？"
+        read -r -p "请选择[y/n]:" installSocks5OutboundStatus
+        if [[ "${installSocks5OutboundStatus}" == "y" ]]; then
+            setSocks5Outbound
+        else
+            echoContent red " ---> 请先安装Socks5出站"
+            exit 0
+        fi
+    fi
+
+    echoContent red "=============================================================="
+    echoContent yellow "# 注意事项"
+    echoContent yellow "1.不会删除已有域名分流规则，可与域名走Socks5、域名直连自由组合"
+    echoContent yellow "2.规则优先级建议：直连域名 > Socks5域名 > IPv6直连 > IPv4兜底Socks5"
+    echoContent yellow "3.域名未解析成IP前可能命中final兜底；高速域名请额外加入直连域名规则"
+    read -r -p "是否确认设置？[y/n]:" socksIPv4GlobalStatus
+    if [[ "${socksIPv4GlobalStatus}" != "y" ]]; then
+        echoContent green " ---> 放弃设置"
+        exit 0
+    fi
+
+    addSingBoxOutbound "01_direct_outbound"
+    addSingBoxOutbound "IPv6_out"
+
+    cat <<EOF >"${singBoxConfigPath}zz_socks5_ipv4_global_route.json"
+{
+  "route": {
+    "rules": [
+      {
+        "ip_version": 6,
+        "outbound": "IPv6_out"
+      },
+      {
+        "ip_version": 4,
+        "outbound": "socks5_outbound"
+      }
+    ],
+    "final": "socks5_outbound"
+  }
+}
+EOF
+
+    echoContent green " ---> 已设置：IPv4兜底走Socks5，IPv6直连"
+}
+
+# sing-box Socks5组合模式：高速域名直连
+setSingBoxSocks5OutboundDirectRouting() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 此功能仅支持 sing-box"
+        exit 0
+    fi
+
+    echoContent red "=============================================================="
+    echoContent skyBlue "请输入需要保持默认高速出口的域名"
+    echoContent yellow "支持sing-box1.8+ rule_set匹配；非增量添加，会替换原有直连域名规则"
+    echoContent yellow "录入示例:speedtest,github.com,cloudflare.com,steam,googlevideo.com"
+    read -r -p "域名:" directRoutingDomain
+    if [[ -z "${directRoutingDomain}" ]]; then
+        echoContent red " ---> 域名不可为空"
+        exit 0
+    fi
+
+    addSingBoxOutbound "01_direct_outbound"
+    addSingBoxRouteRule "01_direct_outbound" "${directRoutingDomain}" "00_socks5_direct_route"
+
+    echoContent green " ---> 已设置高速域名直连规则"
+}
+
+# 查看sing-box Socks5组合分流规则
+showSingBoxSocks5CustomRouting() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 此功能仅支持 sing-box"
+        exit 0
+    fi
+
+    echoContent yellow "\n出站配置："
+    if [[ -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
+        jq .outbounds[0] "${singBoxConfigPath}socks5_outbound.json"
+    else
+        echoContent red " ---> 未安装Socks5出站"
+    fi
+
+    echoContent yellow "\n高速域名直连规则："
+    if [[ -f "${singBoxConfigPath}00_socks5_direct_route.json" ]]; then
+        jq .route.rules "${singBoxConfigPath}00_socks5_direct_route.json"
+    else
+        echoContent yellow " ---> 未设置"
+    fi
+
+    echoContent yellow "\nIP质量域名走Socks5规则："
+    if [[ -f "${singBoxConfigPath}socks5_01_outbound_route.json" ]]; then
+        jq .route.rules "${singBoxConfigPath}socks5_01_outbound_route.json"
+    else
+        echoContent yellow " ---> 未设置"
+    fi
+
+    echoContent yellow "\nIPv4兜底Socks5 / IPv6直连规则："
+    if [[ -f "${singBoxConfigPath}zz_socks5_ipv4_global_route.json" ]]; then
+        jq .route "${singBoxConfigPath}zz_socks5_ipv4_global_route.json"
+    else
+        echoContent yellow " ---> 未设置"
+    fi
+}
+
+# 卸载sing-box Socks5组合分流规则，保留Socks5出站本身
+removeSingBoxSocks5CustomRouting() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 此功能仅支持 sing-box"
+        exit 0
+    fi
+
+    removeSingBoxConfig "00_socks5_direct_route"
+    removeSingBoxConfig "zz_socks5_ipv4_global_route"
+
+    if [[ "$1" != "noReload" ]]; then
+        echoContent green " ---> 已卸载sing-box Socks5组合分流规则"
     fi
 }
 
