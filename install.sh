@@ -8288,10 +8288,12 @@ setSingBoxSocks5OutboundListRouting() {
     echoContent yellow "2.清单外 -> 01_direct_outbound，direct 使用 prefer_ipv6，IPv6不可用时回落IPv4"
     echoContent yellow "3.不会覆盖IPv6配置，也不会把IPv4默认兜底到VPNGate"
     echoContent yellow "4.清单文件：${listFile}"
-    read -r -p "是否确认生成/刷新清单分流？[y/n]:" socksListRoutingStatus
-    if [[ "${socksListRoutingStatus}" != "y" ]]; then
-        echoContent green " ---> 放弃设置"
-        exit 0
+    if [[ "$1" != "noConfirm" ]]; then
+        read -r -p "是否确认生成/刷新清单分流？[y/n]:" socksListRoutingStatus
+        if [[ "${socksListRoutingStatus}" != "y" ]]; then
+            echoContent green " ---> 放弃设置"
+            exit 0
+        fi
     fi
 
     addSingBoxPreferIPv6DirectOutbound
@@ -8424,6 +8426,12 @@ removeSingBoxSocks5CustomRouting() {
     fi
 }
 
+# 刷新VPNGate清单分流并重启sing-box
+refreshSingBoxSocks5RoutingList() {
+    setSingBoxSocks5OutboundListRouting noConfirm
+    reloadCore
+}
+
 # 维护VPNGate清单
 manageSingBoxSocks5RoutingList() {
     readInstallType
@@ -8462,6 +8470,7 @@ manageSingBoxSocks5RoutingList() {
         echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
         awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
         echoContent green " ---> 追加完成"
+        refreshSingBoxSocks5RoutingList
         ;;
     3)
         echoContent yellow "请输入新的完整清单，多个用英文逗号分隔，会覆盖旧清单"
@@ -8472,14 +8481,15 @@ manageSingBoxSocks5RoutingList() {
         fi
         echo "${replaceList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >"${listFile}"
         echoContent green " ---> 替换完成"
+        refreshSingBoxSocks5RoutingList
         ;;
     4)
         writeDefaultSingBoxSocks5RoutingList
         echoContent green " ---> 已重置默认清单"
+        refreshSingBoxSocks5RoutingList
         ;;
     5)
-        setSingBoxSocks5OutboundListRouting
-        reloadCore
+        refreshSingBoxSocks5RoutingList
         ;;
     *)
         echoContent red " ---> 选择错误"
