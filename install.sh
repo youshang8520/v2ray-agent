@@ -7565,10 +7565,11 @@ socks5OutboundRoutingMenu() {
     echoContent yellow "3.查看分流规则"
     echoContent yellow "4.添加域名走Socks5规则[IP质量优先]"
     if [[ -n "${singBoxConfigPath}" ]]; then
-        echoContent yellow "5.设置IPv4兜底走Socks5、IPv6直连[组合模式]"
+        echoContent yellow "5.启用VPNGate清单分流[清单走Socks5，其余IPv6优先直连]"
         echoContent yellow "6.添加域名直连规则[速度优先]"
         echoContent yellow "7.查看sing-box组合分流规则"
         echoContent yellow "8.卸载sing-box组合分流规则"
+        echoContent yellow "9.维护VPNGate清单"
     fi
     read -r -p "请选择:" selectType
     case ${selectType} in
@@ -7595,7 +7596,7 @@ socks5OutboundRoutingMenu() {
         socks5OutboundRoutingMenu
         ;;
     5)
-        setSingBoxSocks5OutboundIPv4Global
+        setSingBoxSocks5OutboundListRouting
         reloadCore
         socks5OutboundRoutingMenu
         ;;
@@ -7611,6 +7612,10 @@ socks5OutboundRoutingMenu() {
     8)
         removeSingBoxSocks5CustomRouting
         reloadCore
+        socks5OutboundRoutingMenu
+        ;;
+    9)
+        manageSingBoxSocks5RoutingList
         socks5OutboundRoutingMenu
         ;;
     esac
@@ -8034,8 +8039,130 @@ EOF
     fi
 }
 
-# sing-box Socks5 IPv4兜底出站，IPv6直连
-setSingBoxSocks5OutboundIPv4Global() {
+# sing-box VPNGate清单文件路径
+singBoxSocks5RoutingListFile() {
+    echo "/etc/v2ray-agent/socks5_vpngate_routing_list"
+}
+
+# 写入默认VPNGate清单，清单内域名/IP会走Socks5出站
+writeDefaultSingBoxSocks5RoutingList() {
+    cat <<EOF >"$(singBoxSocks5RoutingListFile)"
+# VPNGate Socks5 分流清单，一行一个；支持域名、geosite:名称、IPv4/IPv6 CIDR
+# 清单内 -> socks5_outbound；清单外 -> 01_direct_outbound，direct 使用 prefer_ipv6
+# AI / 账号风控 / IP质量敏感
+openai.com
+chatgpt.com
+api.openai.com
+auth0.openai.com
+oaistatic.com
+oaiusercontent.com
+anthropic.com
+claude.ai
+console.anthropic.com
+perplexity.ai
+poe.com
+gemini.google.com
+ai.google.dev
+aistudio.google.com
+makersuite.google.com
+generativelanguage.googleapis.com
+notebooklm.google.com
+githubcopilot.com
+api.githubcopilot.com
+copilot.microsoft.com
+bing.com
+edgeservices.bing.com
+# 流媒体 / 解锁
+netflix.com
+nflxvideo.net
+nflximg.net
+nflxext.com
+nflxso.net
+nflxsearch.net
+disneyplus.com
+disney-plus.net
+dssott.com
+bamgrid.com
+hulu.com
+huluim.com
+max.com
+hbomax.com
+hbonow.com
+primevideo.com
+amazonvideo.com
+video.a2z.com
+media-amazon.com
+spotify.com
+scdn.co
+tiktok.com
+tiktokv.com
+tiktokcdn.com
+byteoversea.com
+ibytedtos.com
+ibyteimg.com
+EOF
+}
+
+# sing-box 默认直连出站，优先IPv6，不可用再回落IPv4
+addSingBoxPreferIPv6DirectOutbound() {
+    cat <<EOF >"${singBoxConfigPath}01_direct_outbound.json"
+{
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "01_direct_outbound",
+      "domain_strategy": "prefer_ipv6"
+    }
+  ]
+}
+EOF
+}
+
+# 将清单转换为sing-box route规则
+buildSingBoxSocks5RoutingListRule() {
+    local listFile=$1
+    local routingName="socks5_vpngate_list"
+    local domainRules=[]
+    local ruleSet=[]
+    local ruleSetTag=[]
+    local ipCidrs=[]
+
+    while read -r line; do
+        local normalizedLine=
+        normalizedLine=$(echo "${line}" | sed 's/#.*//' | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [[ -z "${normalizedLine}" ]]; then
+            continue
+        fi
+
+        if echo "${normalizedLine}" | grep -q '^geosite:'; then
+            local ruleName=
+            ruleName=$(echo "${normalizedLine}" | cut -d ':' -f 2)
+            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${ruleName}_${routingName}\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${ruleName}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
+        elif echo "${normalizedLine}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$|:'; then
+            ipCidrs=$(echo "${ipCidrs}" | jq -r --arg cidr "${normalizedLine}" '. += [$cidr]')
+        elif isDomainFormat "${normalizedLine}"; then
+            local escapedDomain=
+            escapedDomain=${normalizedLine//./\\.}
+            domainRules=$(echo "${domainRules}" | jq -r --arg reg ".*${escapedDomain}.*" '. += [$reg]')
+        else
+            local matchedRuleName=
+            matchedRuleName=$(getDLCGeositeName "${normalizedLine}" "/etc/v2ray-agent/sing-box")
+            if [[ -n "${matchedRuleName}" ]]; then
+                ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${matchedRuleName}_${routingName}\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${matchedRuleName}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
+            else
+                domainRules=$(echo "${domainRules}" | jq -r --arg reg "^([a-zA-Z0-9_-]+\\.)*${normalizedLine//./\\.}" '. += [$reg]')
+            fi
+        fi
+    done <"${listFile}"
+
+    if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
+        ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
+    fi
+    echo "{\"domainRules\":${domainRules},\"ruleSet\":${ruleSet},\"ruleSetTag\":${ruleSetTag},\"ipCidrs\":${ipCidrs}}"
+}
+
+# sing-box VPNGate清单分流：清单走Socks5，其余IPv6优先直连回落IPv4
+setSingBoxSocks5OutboundListRouting() {
     readInstallType
     if [[ -z "${singBoxConfigPath}" ]]; then
         echoContent red " ---> 此功能仅支持 sing-box"
@@ -8053,39 +8180,66 @@ setSingBoxSocks5OutboundIPv4Global() {
         fi
     fi
 
+    local listFile=
+    listFile=$(singBoxSocks5RoutingListFile)
+    if [[ ! -f "${listFile}" ]]; then
+        writeDefaultSingBoxSocks5RoutingList
+    fi
+
     echoContent red "=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "1.不会删除已有域名分流规则，可与域名走Socks5、域名直连自由组合"
-    echoContent yellow "2.规则优先级建议：直连域名 > Socks5域名 > IPv6直连 > IPv4兜底Socks5"
-    echoContent yellow "3.域名未解析成IP前可能命中final兜底；高速域名请额外加入直连域名规则"
-    read -r -p "是否确认设置？[y/n]:" socksIPv4GlobalStatus
-    if [[ "${socksIPv4GlobalStatus}" != "y" ]]; then
+    echoContent yellow "1.清单内域名/IP -> socks5_outbound，例如AimiliVPN/VPNGate"
+    echoContent yellow "2.清单外 -> 01_direct_outbound，direct 使用 prefer_ipv6，IPv6不可用时回落IPv4"
+    echoContent yellow "3.不会覆盖IPv6配置，也不会把IPv4默认兜底到VPNGate"
+    echoContent yellow "4.清单文件：${listFile}"
+    read -r -p "是否确认生成/刷新清单分流？[y/n]:" socksListRoutingStatus
+    if [[ "${socksListRoutingStatus}" != "y" ]]; then
         echoContent green " ---> 放弃设置"
         exit 0
     fi
 
-    addSingBoxOutbound "01_direct_outbound"
-    addSingBoxOutbound "IPv6_out"
+    addSingBoxPreferIPv6DirectOutbound
 
-    cat <<EOF >"${singBoxConfigPath}zz_socks5_ipv4_global_route.json"
+    local rules=
+    rules=$(buildSingBoxSocks5RoutingListRule "${listFile}")
+    local domainRules=
+    local ruleSet=
+    local ruleSetTag=
+    local ipCidrs=
+    domainRules=$(echo "${rules}" | jq .domainRules)
+    ruleSet=$(echo "${rules}" | jq .ruleSet)
+    ruleSetTag=$(echo "${rules}" | jq .ruleSetTag)
+    ipCidrs=$(echo "${rules}" | jq .ipCidrs)
+
+    if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
+        echoContent red " ---> 清单为空，请先维护清单"
+        exit 0
+    fi
+
+    cat <<EOF >"${singBoxConfigPath}00_socks5_vpngate_list_route.json"
 {
   "route": {
     "rules": [
       {
-        "ip_version": 6,
-        "outbound": "IPv6_out"
-      },
-      {
-        "ip_version": 4,
+        "rule_set": ${ruleSetTag},
+        "domain_regex": ${domainRules},
+        "ip_cidr": ${ipCidrs},
         "outbound": "socks5_outbound"
       }
     ],
-    "final": "socks5_outbound"
+    "rule_set": ${ruleSet},
+    "final": "01_direct_outbound"
   }
 }
 EOF
 
-    echoContent green " ---> 已设置：IPv4兜底走Socks5，IPv6直连"
+    jq 'if .route.rule_set == [] then del(.route.rule_set) else . end
+        | if .route.rules[0].rule_set == [] then del(.route.rules[0].rule_set) else . end
+        | if .route.rules[0].domain_regex == [] then del(.route.rules[0].domain_regex) else . end
+        | if .route.rules[0].ip_cidr == [] then del(.route.rules[0].ip_cidr) else . end' \
+        "${singBoxConfigPath}00_socks5_vpngate_list_route.json" >"${singBoxConfigPath}00_socks5_vpngate_list_route_tmp.json" && mv "${singBoxConfigPath}00_socks5_vpngate_list_route_tmp.json" "${singBoxConfigPath}00_socks5_vpngate_list_route.json"
+
+    echoContent green " ---> 已设置：清单走Socks5，清单外IPv6优先直连并回落IPv4"
 }
 
 # sing-box Socks5组合模式：高速域名直连
@@ -8106,8 +8260,8 @@ setSingBoxSocks5OutboundDirectRouting() {
         exit 0
     fi
 
-    addSingBoxOutbound "01_direct_outbound"
-    addSingBoxRouteRule "01_direct_outbound" "${directRoutingDomain}" "00_socks5_direct_route"
+    addSingBoxPreferIPv6DirectOutbound
+    addSingBoxRouteRule "01_direct_outbound" "${directRoutingDomain}" "10_socks5_direct_route"
 
     echoContent green " ---> 已设置高速域名直连规则"
 }
@@ -8127,29 +8281,36 @@ showSingBoxSocks5CustomRouting() {
         echoContent red " ---> 未安装Socks5出站"
     fi
 
-    echoContent yellow "\n高速域名直连规则："
-    if [[ -f "${singBoxConfigPath}00_socks5_direct_route.json" ]]; then
-        jq .route.rules "${singBoxConfigPath}00_socks5_direct_route.json"
+    echoContent yellow "\nVPNGate清单文件：$(singBoxSocks5RoutingListFile)"
+    if [[ -f "$(singBoxSocks5RoutingListFile)" ]]; then
+        grep -v '^#' "$(singBoxSocks5RoutingListFile)" | grep -v '^$' || true
+    else
+        echoContent yellow " ---> 未创建"
+    fi
+
+    echoContent yellow "\nVPNGate清单分流规则："
+    if [[ -f "${singBoxConfigPath}00_socks5_vpngate_list_route.json" ]]; then
+        jq .route "${singBoxConfigPath}00_socks5_vpngate_list_route.json"
     else
         echoContent yellow " ---> 未设置"
     fi
 
-    echoContent yellow "\nIP质量域名走Socks5规则："
+    echoContent yellow "\n高速域名直连规则："
+    if [[ -f "${singBoxConfigPath}10_socks5_direct_route.json" ]]; then
+        jq .route.rules "${singBoxConfigPath}10_socks5_direct_route.json"
+    else
+        echoContent yellow " ---> 未设置"
+    fi
+
+    echoContent yellow "\n手动域名走Socks5规则："
     if [[ -f "${singBoxConfigPath}socks5_01_outbound_route.json" ]]; then
         jq .route.rules "${singBoxConfigPath}socks5_01_outbound_route.json"
     else
         echoContent yellow " ---> 未设置"
     fi
-
-    echoContent yellow "\nIPv4兜底Socks5 / IPv6直连规则："
-    if [[ -f "${singBoxConfigPath}zz_socks5_ipv4_global_route.json" ]]; then
-        jq .route "${singBoxConfigPath}zz_socks5_ipv4_global_route.json"
-    else
-        echoContent yellow " ---> 未设置"
-    fi
 }
 
-# 卸载sing-box Socks5组合分流规则，保留Socks5出站本身
+# 卸载sing-box Socks5组合分流规则，保留Socks5出站本身和清单文件
 removeSingBoxSocks5CustomRouting() {
     readInstallType
     if [[ -z "${singBoxConfigPath}" ]]; then
@@ -8157,12 +8318,77 @@ removeSingBoxSocks5CustomRouting() {
         exit 0
     fi
 
+    removeSingBoxConfig "00_socks5_vpngate_list_route"
+    removeSingBoxConfig "10_socks5_direct_route"
     removeSingBoxConfig "00_socks5_direct_route"
     removeSingBoxConfig "zz_socks5_ipv4_global_route"
 
     if [[ "$1" != "noReload" ]]; then
         echoContent green " ---> 已卸载sing-box Socks5组合分流规则"
     fi
+}
+
+# 维护VPNGate清单
+manageSingBoxSocks5RoutingList() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 此功能仅支持 sing-box"
+        exit 0
+    fi
+
+    local listFile=
+    listFile=$(singBoxSocks5RoutingListFile)
+    if [[ ! -f "${listFile}" ]]; then
+        writeDefaultSingBoxSocks5RoutingList
+    fi
+
+    echoContent skyBlue "\n功能 1/1 : 维护VPNGate清单"
+    echoContent red "\n=============================================================="
+    echoContent yellow "1.查看清单"
+    echoContent yellow "2.追加清单"
+    echoContent yellow "3.替换清单"
+    echoContent yellow "4.重置默认清单"
+    echoContent yellow "5.从清单生成/刷新分流规则"
+    read -r -p "请选择:" listManageStatus
+
+    case ${listManageStatus} in
+    1)
+        echoContent yellow "\n清单文件：${listFile}"
+        grep -v '^#' "${listFile}" | grep -v '^$' || true
+        ;;
+    2)
+        echoContent yellow "请输入要追加的域名/IP/CIDR，多个用英文逗号分隔"
+        read -r -p "清单:" appendList
+        if [[ -z "${appendList}" ]]; then
+            echoContent red " ---> 清单不可为空"
+            exit 0
+        fi
+        echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
+        awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
+        echoContent green " ---> 追加完成"
+        ;;
+    3)
+        echoContent yellow "请输入新的完整清单，多个用英文逗号分隔，会覆盖旧清单"
+        read -r -p "清单:" replaceList
+        if [[ -z "${replaceList}" ]]; then
+            echoContent red " ---> 清单不可为空"
+            exit 0
+        fi
+        echo "${replaceList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >"${listFile}"
+        echoContent green " ---> 替换完成"
+        ;;
+    4)
+        writeDefaultSingBoxSocks5RoutingList
+        echoContent green " ---> 已重置默认清单"
+        ;;
+    5)
+        setSingBoxSocks5OutboundListRouting
+        reloadCore
+        ;;
+    *)
+        echoContent red " ---> 选择错误"
+        ;;
+    esac
 }
 
 # 设置VMess+WS+TLS【仅出站】
