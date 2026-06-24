@@ -8164,6 +8164,27 @@ api.githubcopilot.com
 copilot.microsoft.com
 bing.com
 edgeservices.bing.com
+# IP / WebRTC / 风控检测
+ippure.com
+browserleaks.com
+ipleak.net
+dnsleaktest.com
+whoer.net
+ipinfo.io
+ip.sb
+ipify.org
+api.ipify.org
+icanhazip.com
+ifconfig.me
+myip.com
+whatismyipaddress.com
+ip-api.com
+ipapi.co
+ipapi.is
+ipdata.co
+iphey.com
+pixelscan.net
+scamalytics.com
 # 流媒体 / 解锁
 netflix.com
 nflxvideo.net
