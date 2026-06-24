@@ -3388,6 +3388,22 @@ removeSingBoxRouteRule() {
     fi
 }
 
+# 添加sing-box本地DNS解析器，供 sing-box 1.12+ domain_resolver 使用
+addSingBoxLocalDNSResolver() {
+    cat <<EOF >"${singBoxConfigPath}00_local_dns_resolver.json"
+{
+  "dns": {
+    "servers": [
+      {
+        "tag": "local_dns_resolver",
+        "type": "local"
+      }
+    ]
+  }
+}
+EOF
+}
+
 # 添加sing-box出站
 addSingBoxOutbound() {
     local tag=$1
@@ -3397,6 +3413,7 @@ addSingBoxOutbound() {
         type=ipv6
     fi
     if [[ -n "${detour}" ]]; then
+        addSingBoxLocalDNSResolver
         cat <<EOF >"${singBoxConfigPath}${tag}.json"
 {
      "outbounds": [
@@ -3404,7 +3421,10 @@ addSingBoxOutbound() {
              "type": "direct",
              "tag": "${tag}",
              "detour": "${detour}",
-             "domain_strategy": "${type}_only"
+             "domain_resolver": {
+                  "server": "local_dns_resolver",
+                  "strategy": "${type}_only"
+             }
         }
     ]
 }
@@ -3434,13 +3454,17 @@ EOF
 }
 EOF
     else
+        addSingBoxLocalDNSResolver
         cat <<EOF >"${singBoxConfigPath}${tag}.json"
 {
      "outbounds": [
         {
              "type": "direct",
              "tag": "${tag}",
-             "domain_strategy": "${type}_only"
+             "domain_resolver": {
+                  "server": "local_dns_resolver",
+                  "strategy": "${type}_only"
+             }
         }
     ]
 }
@@ -3742,9 +3766,44 @@ singBoxHysteria2Install() {
     showAccounts 4
 }
 
+# 迁移 sing-box 1.12+ 废弃的 domain_strategy 配置
+migrateSingBoxLegacyDomainStrategyOptions() {
+    local configDir=${singBoxConfigPath:-/etc/v2ray-agent/sing-box/conf/config/}
+    if [[ ! -d "${configDir}" ]]; then
+        return
+    fi
+
+    local legacyFiles=
+    legacyFiles=$(grep -rl '"domain_strategy"' "${configDir}"*.json 2>/dev/null || true)
+    if [[ -z "${legacyFiles}" ]]; then
+        return
+    fi
+
+    cat <<EOF >"${configDir}00_local_dns_resolver.json"
+{
+  "dns": {
+    "servers": [
+      {
+        "tag": "local_dns_resolver",
+        "type": "local"
+      }
+    ]
+  }
+}
+EOF
+
+    while read -r legacyFile; do
+        if [[ -z "${legacyFile}" ]]; then
+            continue
+        fi
+        jq 'walk(if type == "object" and has("domain_strategy") then (.domain_resolver = {"server":"local_dns_resolver","strategy": .domain_strategy}) | del(.domain_strategy) else . end)' "${legacyFile}" >"${legacyFile}.tmp" && mv "${legacyFile}.tmp" "${legacyFile}"
+    done < <(echo "${legacyFiles}")
+}
+
 # 合并config
 singBoxMergeConfig() {
     rm /etc/v2ray-agent/sing-box/conf/config.json >/dev/null 2>&1
+    migrateSingBoxLegacyDomainStrategyOptions
     /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ >/dev/null 2>&1
 }
 
@@ -8119,13 +8178,17 @@ EOF
 
 # sing-box 默认直连出站，优先IPv6，不可用再回落IPv4
 addSingBoxPreferIPv6DirectOutbound() {
+    addSingBoxLocalDNSResolver
     cat <<EOF >"${singBoxConfigPath}01_direct_outbound.json"
 {
   "outbounds": [
     {
       "type": "direct",
       "tag": "01_direct_outbound",
-      "domain_strategy": "prefer_ipv6"
+      "domain_resolver": {
+        "server": "local_dns_resolver",
+        "strategy": "prefer_ipv6"
+      }
     }
   ]
 }
