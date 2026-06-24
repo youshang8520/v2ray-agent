@@ -3388,7 +3388,7 @@ removeSingBoxRouteRule() {
     fi
 }
 
-# 添加sing-box本地DNS解析器，供 sing-box 1.12+ domain_resolver 使用
+# 添加sing-box本地DNS解析器和默认域名解析器，供 sing-box 1.12+ domain_resolver 使用
 addSingBoxLocalDNSResolver() {
     cat <<EOF >"${singBoxConfigPath}00_local_dns_resolver.json"
 {
@@ -3399,6 +3399,15 @@ addSingBoxLocalDNSResolver() {
         "type": "local"
       }
     ]
+  }
+}
+EOF
+    cat <<EOF >"${singBoxConfigPath}00_default_domain_resolver_route.json"
+{
+  "route": {
+    "default_domain_resolver": {
+      "server": "local_dns_resolver"
+    }
   }
 }
 EOF
@@ -3773,12 +3782,6 @@ migrateSingBoxLegacyDomainStrategyOptions() {
         return
     fi
 
-    local legacyFiles=
-    legacyFiles=$(grep -rl '"domain_strategy"' "${configDir}"*.json 2>/dev/null || true)
-    if [[ -z "${legacyFiles}" ]]; then
-        return
-    fi
-
     cat <<EOF >"${configDir}00_local_dns_resolver.json"
 {
   "dns": {
@@ -3792,11 +3795,27 @@ migrateSingBoxLegacyDomainStrategyOptions() {
 }
 EOF
 
+    cat <<EOF >"${configDir}00_default_domain_resolver_route.json"
+{
+  "route": {
+    "default_domain_resolver": {
+      "server": "local_dns_resolver"
+    }
+  }
+}
+EOF
+
+    local legacyFiles=
+    legacyFiles=$(grep -rl '"domain_strategy"' "${configDir}"*.json 2>/dev/null || true)
+    if [[ -z "${legacyFiles}" ]]; then
+        return
+    fi
+
     while read -r legacyFile; do
         if [[ -z "${legacyFile}" ]]; then
             continue
         fi
-        jq 'walk(if type == "object" and has("domain_strategy") then (.domain_resolver = {"server":"local_dns_resolver","strategy": .domain_strategy}) | del(.domain_strategy) else . end)' "${legacyFile}" >"${legacyFile}.tmp" && mv "${legacyFile}.tmp" "${legacyFile}"
+        jq 'walk(if type == "object" and has("domain_strategy") then (.domain_resolver = {"server":"local_dns_resolver","strategy": .domain_strategy}) | del(.domain_strategy) else . end)' "${legacyFile}" >"${legacyFile}.tmp" && cat "${legacyFile}.tmp" >"${legacyFile}" && rm -f "${legacyFile}.tmp"
     done < <(echo "${legacyFiles}")
 }
 
