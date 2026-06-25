@@ -7569,6 +7569,7 @@ socks5Routing() {
     echoContent yellow "# 流量明文访问"
 
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
+    echoContent yellow "# 单 Socks5、多 Socks5、全局等模式可直接覆盖安装，脚本会自动清理冲突配置。"
     echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000#heading-5 \n"
 
     echoContent yellow "1.单 Socks5 出站"
@@ -7629,6 +7630,541 @@ validateSocks5Alias() {
     return 0
 }
 
+# 多 Socks5 出站标签
+socks5MultiOutboundTag() {
+    echo "socks5_multi_$1"
+}
+
+# 多 Socks5 代理清单文件
+socks5MultiListFile() {
+    echo "$(socks5MultiListDir)/$1.list"
+}
+
+# 校验端口
+validateSocks5Port() {
+    local port=$1
+    if ! echo "${port}" | grep -Eq '^[0-9]+$' || [[ "${port}" -lt 1 || "${port}" -gt 65535 ]]; then
+        echoContent red " ---> 端口必须是 1-65535 的数字"
+        return 1
+    fi
+    return 0
+}
+
+# 校验优先级
+validateSocks5Priority() {
+    local priority=$1
+    if ! echo "${priority}" | grep -Eq '^[0-9]+$'; then
+        echoContent red " ---> 优先级必须是数字"
+        return 1
+    fi
+    return 0
+}
+
+# 获取下一个多 Socks5 优先级
+nextSocks5MultiPriority() {
+    local indexFile=
+    indexFile=$(socks5MultiIndexFile)
+    echo $((($(jq '.|length' "${indexFile}") + 1) * 10))
+}
+
+# 判断多 Socks5 代理是否存在
+socks5MultiProxyExists() {
+    local alias=$1
+    jq -e --arg alias "${alias}" '.[] | select(.alias == $alias)' "$(socks5MultiIndexFile)" >/dev/null 2>&1
+}
+
+# 选择多 Socks5 代理别名
+selectSocks5MultiAlias() {
+    showSocks5MultiOutbounds
+    read -r -p "请输入代理别名:" socks5MultiSelectedAlias
+    validateSocks5Alias "${socks5MultiSelectedAlias}" || return 1
+    if ! socks5MultiProxyExists "${socks5MultiSelectedAlias}"; then
+        echoContent red " ---> 代理别名不存在"
+        return 1
+    fi
+    return 0
+}
+
+# 写入单个多 Socks5 出站配置
+writeSocks5MultiOutboundConfig() {
+    local alias=$1
+    local indexFile=
+    indexFile=$(socks5MultiIndexFile)
+    local proxy=
+    proxy=$(jq -c --arg alias "${alias}" '.[] | select(.alias == $alias)' "${indexFile}")
+    if [[ -z "${proxy}" ]]; then
+        return 1
+    fi
+
+    local tag=
+    local server=
+    local serverPort=
+    local username=
+    local password=
+    tag=$(echo "${proxy}" | jq -r '.tag')
+    server=$(echo "${proxy}" | jq -r '.server')
+    serverPort=$(echo "${proxy}" | jq -r '.server_port')
+    username=$(echo "${proxy}" | jq -r '.username // ""')
+    password=$(echo "${proxy}" | jq -r '.password // ""')
+
+    cat <<EOF >"${singBoxConfigPath}${tag}.json"
+{
+    "outbounds":[
+        {
+          "type": "socks",
+          "tag":"${tag}",
+          "server": "${server}",
+          "server_port": ${serverPort},
+          "version": "5"
+        }
+    ]
+}
+EOF
+    if [[ -n "${username}" ]]; then
+        local socks5OutboundConfig=
+        socks5OutboundConfig=$(jq --arg username "${username}" --arg password "${password}" '.outbounds[0].username=$username | .outbounds[0].password=$password' "${singBoxConfigPath}${tag}.json")
+        echo "${socks5OutboundConfig}" | jq . >"${singBoxConfigPath}${tag}.json"
+    fi
+}
+
+# 写入所有启用的多 Socks5 出站配置
+writeSocks5MultiOutboundConfigs() {
+    rm -f "${singBoxConfigPath}"socks5_multi_*.json >/dev/null 2>&1
+    while read -r proxy; do
+        writeSocks5MultiOutboundConfig "$(echo "${proxy}" | jq -r '.alias')"
+    done < <(jq -c '.[] | select(.enabled == true)' "$(socks5MultiIndexFile)")
+}
+
+# 添加多 Socks5 代理
+addSocks5MultiOutbound() {
+    initSocks5MultiStorage
+    local indexFile=
+    indexFile=$(socks5MultiIndexFile)
+
+    read -r -p "请输入代理别名[英文/数字/下划线/短横线]:" socks5Alias
+    validateSocks5Alias "${socks5Alias}" || return 1
+    if socks5MultiProxyExists "${socks5Alias}"; then
+        echoContent red " ---> 代理别名已存在"
+        return 1
+    fi
+
+    read -r -p "请输入落地机IP/域名:" socks5Server
+    if [[ -z "${socks5Server}" ]]; then
+        echoContent red " ---> IP/域名不可为空"
+        return 1
+    fi
+
+    read -r -p "请输入落地机端口:" socks5Port
+    validateSocks5Port "${socks5Port}" || return 1
+
+    read -r -p "请输入用户名[回车无认证]:" socks5Username
+    read -r -p "请输入用户密码[回车无认证]:" socks5Password
+    if [[ -z "${socks5Username}" && -n "${socks5Password}" ]] || [[ -n "${socks5Username}" && -z "${socks5Password}" ]]; then
+        echoContent red " ---> 用户名和密码必须同时填写，或同时留空"
+        return 1
+    fi
+
+    local defaultPriority=
+    defaultPriority=$(nextSocks5MultiPriority)
+    read -r -p "请输入优先级[回车默认${defaultPriority}，数字越小越优先]:" socks5Priority
+    if [[ -z "${socks5Priority}" ]]; then
+        socks5Priority=${defaultPriority}
+    fi
+    validateSocks5Priority "${socks5Priority}" || return 1
+
+    local tag=
+    tag=$(socks5MultiOutboundTag "${socks5Alias}")
+    local item=
+    item=$(jq -n \
+        --arg alias "${socks5Alias}" \
+        --arg tag "${tag}" \
+        --arg server "${socks5Server}" \
+        --argjson port "${socks5Port}" \
+        --arg username "${socks5Username}" \
+        --arg password "${socks5Password}" \
+        --argjson priority "${socks5Priority}" \
+        '{alias:$alias,tag:$tag,server:$server,server_port:$port,username:$username,password:$password,enabled:true,priority:$priority}')
+    jq --argjson item "${item}" '. + [$item] | sort_by([(.priority // 0), .alias])' "${indexFile}" >"${indexFile}.tmp" && mv "${indexFile}.tmp" "${indexFile}"
+
+    local listFile=
+    listFile=$(socks5MultiListFile "${socks5Alias}")
+    if [[ ! -f "${listFile}" ]]; then
+        cat <<EOF >"${listFile}"
+# 多 Socks5 代理 ${socks5Alias} 清单，一行一个；支持域名、geosite:名称、IPv4/IPv6 CIDR
+# 该清单命中的流量会走 ${tag}
+EOF
+    fi
+    read -r -p "请输入该代理清单[多个用英文逗号分隔，回车稍后维护]:" socks5List
+    if [[ -n "${socks5List}" ]]; then
+        echo "${socks5List}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
+        awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
+    fi
+
+    writeSocks5MultiOutboundConfig "${socks5Alias}"
+    echoContent green " ---> 多 Socks5 代理已添加"
+}
+
+# 编辑多 Socks5 代理
+editSocks5MultiOutbound() {
+    initSocks5MultiStorage
+    selectSocks5MultiAlias || return 1
+    local alias=${socks5MultiSelectedAlias}
+    local indexFile=
+    indexFile=$(socks5MultiIndexFile)
+    local proxy=
+    proxy=$(jq -c --arg alias "${alias}" '.[] | select(.alias == $alias)' "${indexFile}")
+
+    local currentServer=
+    local currentPort=
+    local currentUsername=
+    local currentPassword=
+    local currentEnabled=
+    local currentPriority=
+    currentServer=$(echo "${proxy}" | jq -r '.server')
+    currentPort=$(echo "${proxy}" | jq -r '.server_port')
+    currentUsername=$(echo "${proxy}" | jq -r '.username // ""')
+    currentPassword=$(echo "${proxy}" | jq -r '.password // ""')
+    currentEnabled=$(echo "${proxy}" | jq -r '.enabled')
+    currentPriority=$(echo "${proxy}" | jq -r '.priority // 10')
+
+    read -r -p "请输入落地机IP/域名[回车保留${currentServer}]:" newServer
+    if [[ -z "${newServer}" ]]; then
+        newServer=${currentServer}
+    fi
+
+    read -r -p "请输入落地机端口[回车保留${currentPort}]:" newPort
+    if [[ -z "${newPort}" ]]; then
+        newPort=${currentPort}
+    fi
+    validateSocks5Port "${newPort}" || return 1
+
+    echoContent yellow "认证信息：回车保留当前认证；输入 none 清空认证；输入新用户名则继续输入新密码"
+    read -r -p "请输入用户名:" newUsername
+    local newPassword=${currentPassword}
+    if [[ "${newUsername}" == "none" ]]; then
+        newUsername=""
+        newPassword=""
+    elif [[ -n "${newUsername}" ]]; then
+        read -r -p "请输入用户密码:" newPassword
+        if [[ -z "${newPassword}" ]]; then
+            echoContent red " ---> 用户名和密码必须同时填写，或同时留空"
+            return 1
+        fi
+    else
+        newUsername=${currentUsername}
+    fi
+
+    read -r -p "是否启用该代理？[y/n，回车保留${currentEnabled}]:" enabledStatus
+    local newEnabled=${currentEnabled}
+    if [[ "${enabledStatus}" == "y" ]]; then
+        newEnabled=true
+    elif [[ "${enabledStatus}" == "n" ]]; then
+        newEnabled=false
+    fi
+
+    read -r -p "请输入优先级[回车保留${currentPriority}]:" newPriority
+    if [[ -z "${newPriority}" ]]; then
+        newPriority=${currentPriority}
+    fi
+    validateSocks5Priority "${newPriority}" || return 1
+
+    jq \
+        --arg alias "${alias}" \
+        --arg server "${newServer}" \
+        --argjson port "${newPort}" \
+        --arg username "${newUsername}" \
+        --arg password "${newPassword}" \
+        --argjson enabled "${newEnabled}" \
+        --argjson priority "${newPriority}" \
+        'map(if .alias == $alias then .server=$server | .server_port=$port | .username=$username | .password=$password | .enabled=$enabled | .priority=$priority else . end) | sort_by([(.priority // 0), .alias])' \
+        "${indexFile}" >"${indexFile}.tmp" && mv "${indexFile}.tmp" "${indexFile}"
+
+    writeSocks5MultiOutboundConfig "${alias}"
+    echoContent green " ---> 多 Socks5 代理已更新"
+}
+
+# 删除多 Socks5 代理
+removeSocks5MultiOutbound() {
+    initSocks5MultiStorage
+    selectSocks5MultiAlias || return 1
+    local alias=${socks5MultiSelectedAlias}
+    local tag=
+    tag=$(socks5MultiOutboundTag "${alias}")
+    read -r -p "是否确认删除代理 ${alias} 及其清单？[y/n]:" removeStatus
+    if [[ "${removeStatus}" != "y" ]]; then
+        echoContent green " ---> 放弃删除"
+        return 0
+    fi
+
+    jq --arg alias "${alias}" 'map(select(.alias != $alias))' "$(socks5MultiIndexFile)" >"$(socks5MultiIndexFile).tmp" && mv "$(socks5MultiIndexFile).tmp" "$(socks5MultiIndexFile)"
+    rm -f "${singBoxConfigPath}${tag}.json" >/dev/null 2>&1
+    rm -f "$(socks5MultiListFile "${alias}")" >/dev/null 2>&1
+    echoContent green " ---> 多 Socks5 代理已删除"
+}
+
+# 管理多 Socks5 代理清单
+manageSocks5MultiRoutingList() {
+    initSocks5MultiStorage
+    selectSocks5MultiAlias || return 1
+    local alias=${socks5MultiSelectedAlias}
+    local listFile=
+    listFile=$(socks5MultiListFile "${alias}")
+    if [[ ! -f "${listFile}" ]]; then
+        touch "${listFile}"
+    fi
+
+    echoContent skyBlue "\n功能 1/1 : 管理 ${alias} 清单"
+    echoContent red "\n=============================================================="
+    echoContent yellow "1.查看清单"
+    echoContent yellow "2.追加清单"
+    echoContent yellow "3.替换清单"
+    echoContent yellow "4.清空清单"
+    echoContent yellow "5.从清单生成/刷新分流规则"
+    read -r -p "请选择:" listManageStatus
+
+    case ${listManageStatus} in
+    1)
+        echoContent yellow "\n清单文件：${listFile}"
+        grep -v '^#' "${listFile}" | grep -v '^$' || true
+        ;;
+    2)
+        echoContent yellow "请输入要追加的域名/IP/CIDR/geosite，多个用英文逗号分隔"
+        read -r -p "清单:" appendList
+        if [[ -z "${appendList}" ]]; then
+            echoContent red " ---> 清单不可为空"
+            return 1
+        fi
+        echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
+        awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
+        echoContent green " ---> 追加完成"
+        refreshSocks5MultiOutboundRouting
+        ;;
+    3)
+        echoContent yellow "请输入新的完整清单，多个用英文逗号分隔，会覆盖旧清单"
+        read -r -p "清单:" replaceList
+        if [[ -z "${replaceList}" ]]; then
+            echoContent red " ---> 清单不可为空"
+            return 1
+        fi
+        echo "${replaceList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >"${listFile}"
+        echoContent green " ---> 替换完成"
+        refreshSocks5MultiOutboundRouting
+        ;;
+    4)
+        read -r -p "是否确认清空 ${alias} 清单？[y/n]:" clearStatus
+        if [[ "${clearStatus}" == "y" ]]; then
+            : >"${listFile}"
+            echoContent green " ---> 已清空"
+            refreshSocks5MultiOutboundRouting
+        fi
+        ;;
+    5)
+        refreshSocks5MultiOutboundRouting
+        ;;
+    *)
+        echoContent red " ---> 选择错误"
+        ;;
+    esac
+}
+
+# 生成/刷新多 Socks5 出站与分流规则
+setSocks5MultiOutboundRouting() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 多 Socks5 出站仅支持 sing-box"
+        return 1
+    fi
+    initSocks5MultiStorage
+
+    local indexFile=
+    indexFile=$(socks5MultiIndexFile)
+    if [[ "$(jq '.|length' "${indexFile}")" == "0" ]]; then
+        removeSingBoxConfig "00_socks5_multi_route"
+        rm -f "${singBoxConfigPath}"socks5_multi_*.json >/dev/null 2>&1
+        echoContent red " ---> 暂无多 Socks5 代理，请先添加代理"
+        return 1
+    fi
+
+    if [[ "$1" != "noConfirm" ]]; then
+        echoContent yellow "# 会生成 socks5_multi_* 出站和 00_socks5_multi_route 分流规则"
+        echoContent yellow "# 多个代理按优先级从小到大匹配，清单外走 VPS 默认出口"
+        echoContent yellow "# 如原来启用 WARP/WireGuard 全局，多 Socks5 会自动覆盖其出口规则"
+        read -r -p "是否确认刷新？[y/n]:" refreshStatus
+        if [[ "${refreshStatus}" != "y" ]]; then
+            echoContent green " ---> 放弃刷新"
+            return 0
+        fi
+    fi
+
+    addSingBoxPreferIPv6DirectOutbound
+    removeSingBoxConfig "socks5_outbound"
+    removeSingBoxConfig "socks5_01_outbound_route"
+    removeSingBoxConfig "00_socks5_vpngate_list_route"
+    removeSingBoxConfig "10_socks5_direct_route"
+    removeSingBoxConfig "00_socks5_direct_route"
+    removeSingBoxConfig "zz_socks5_ipv4_global_route"
+    removeSingBoxConfig "00_socks5_multi_route"
+    rm -f "$(singBoxSocks5RoutingListFile)" >/dev/null 2>&1
+    writeSocks5MultiOutboundConfigs
+
+    local routeRules=[]
+    local routeRuleSet=[]
+    local enabledCount=0
+    while read -r proxy; do
+        local alias=
+        local tag=
+        local listFile=
+        alias=$(echo "${proxy}" | jq -r '.alias')
+        tag=$(echo "${proxy}" | jq -r '.tag')
+        listFile=$(socks5MultiListFile "${alias}")
+        if [[ ! -f "${listFile}" ]]; then
+            echoContent yellow " ---> ${alias} 清单不存在，跳过"
+            continue
+        fi
+
+        local rules=
+        local domainRules=
+        local domainSuffix=
+        local ruleSet=
+        local ruleSetTag=
+        local ipCidrs=
+        rules=$(buildSingBoxSocks5RoutingListRule "${listFile}" "socks5_multi_${alias}")
+        domainRules=$(echo "${rules}" | jq .domainRules)
+        domainSuffix=$(echo "${rules}" | jq .domainSuffix)
+        ruleSet=$(echo "${rules}" | jq .ruleSet)
+        ruleSetTag=$(echo "${rules}" | jq .ruleSetTag)
+        ipCidrs=$(echo "${rules}" | jq .ipCidrs)
+
+        if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
+            echoContent yellow " ---> ${alias} 清单为空，跳过"
+            continue
+        fi
+
+        local childRules=[]
+        if [[ "$(echo "${ruleSetTag}" | jq '.|length')" != "0" ]]; then
+            childRules=$(jq -n --argjson current "${childRules}" --argjson item "${ruleSetTag}" '$current + [{"rule_set":$item}]')
+        fi
+        if [[ "$(echo "${domainSuffix}" | jq '.|length')" != "0" ]]; then
+            childRules=$(jq -n --argjson current "${childRules}" --argjson item "${domainSuffix}" '$current + [{"domain_suffix":$item}]')
+        fi
+        if [[ "$(echo "${domainRules}" | jq '.|length')" != "0" ]]; then
+            childRules=$(jq -n --argjson current "${childRules}" --argjson item "${domainRules}" '$current + [{"domain_regex":$item}]')
+        fi
+        if [[ "$(echo "${ipCidrs}" | jq '.|length')" != "0" ]]; then
+            childRules=$(jq -n --argjson current "${childRules}" --argjson item "${ipCidrs}" '$current + [{"ip_cidr":$item}]')
+        fi
+
+        local routeRule=
+        routeRule=$(jq -n --arg outbound "${tag}" --argjson rules "${childRules}" '{"type":"logical","mode":"or","rules":$rules,"outbound":$outbound}')
+        routeRules=$(jq -n --argjson current "${routeRules}" --argjson item "${routeRule}" '$current + [$item]')
+        routeRuleSet=$(jq -n --argjson current "${routeRuleSet}" --argjson item "${ruleSet}" '$current + $item')
+        enabledCount=$((enabledCount + 1))
+    done < <(jq -c 'sort_by([(.priority // 0), .alias])[] | select(.enabled == true)' "${indexFile}")
+
+    if [[ "${enabledCount}" == "0" ]]; then
+        echoContent red " ---> 没有启用且清单非空的多 Socks5 代理"
+        return 1
+    fi
+
+    local sniffRule='{"action":"sniff","timeout":"1s"}'
+    local stunRule='{"type":"logical","mode":"or","rules":[{"protocol":"stun"},{"domain_keyword":["stun","turn"]},{"domain_regex":["(^|\\.)stun\\.","(^|\\.)turn\\."]},{"network":"udp","port":[3478,5349]}],"action":"reject","method":"drop"}'
+    jq -n \
+        --argjson sniff "${sniffRule}" \
+        --argjson stun "${stunRule}" \
+        --argjson rules "${routeRules}" \
+        --argjson ruleSet "${routeRuleSet}" \
+        '{route:{rules:([$sniff,$stun] + $rules),rule_set:$ruleSet,final:"01_direct_outbound"}} | if (.route.rule_set | length) == 0 then del(.route.rule_set) else . end' \
+        >"${singBoxConfigPath}00_socks5_multi_route.json"
+
+    echoContent green " ---> 已刷新多 Socks5 分流规则"
+}
+
+# 刷新多 Socks5 分流并重启内核
+refreshSocks5MultiOutboundRouting() {
+    if setSocks5MultiOutboundRouting noConfirm; then
+        reloadCore
+    fi
+}
+
+# 查看多 Socks5 分流规则
+showSocks5MultiRoutingRules() {
+    showSocks5MultiOutbounds
+    echoContent yellow "\n多 Socks5 分流规则："
+    if [[ -f "${singBoxConfigPath}00_socks5_multi_route.json" ]]; then
+        jq .route "${singBoxConfigPath}00_socks5_multi_route.json"
+    else
+        echoContent yellow " ---> 未设置"
+    fi
+}
+
+# 检查多 Socks5 清单冲突
+checkSocks5MultiRoutingListConflict() {
+    initSocks5MultiStorage
+    local tmpFile=
+    tmpFile=$(mktemp)
+    while read -r alias; do
+        local listFile=
+        listFile=$(socks5MultiListFile "${alias}")
+        if [[ -f "${listFile}" ]]; then
+            while read -r line; do
+                local normalizedLine=
+                normalizedLine=$(echo "${line}" | sed 's/#.*//' | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [[ -n "${normalizedLine}" ]]; then
+                    printf '%s\t%s\n' "${normalizedLine}" "${alias}" >>"${tmpFile}"
+                fi
+            done <"${listFile}"
+        fi
+    done < <(jq -r '.[].alias' "$(socks5MultiIndexFile)")
+
+    if [[ ! -s "${tmpFile}" ]]; then
+        echoContent yellow " ---> 暂无清单内容"
+        rm -f "${tmpFile}"
+        return 0
+    fi
+
+    awk -F '\t' '
+    !seen[$1 FS $2]++ { count[$1]++; aliases[$1]=(aliases[$1] ? aliases[$1] "," $2 : $2) }
+    END {
+        found=0
+        for (entry in count) {
+            if (count[entry] > 1) {
+                found=1
+                printf "冲突: %s -> %s\n", entry, aliases[entry]
+            }
+        }
+        if (found == 0) {
+            print "未发现清单冲突"
+        }
+    }' "${tmpFile}"
+    rm -f "${tmpFile}"
+}
+
+# 卸载多 Socks5 配置
+removeSocks5MultiOutboundRouting() {
+    readInstallType
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 多 Socks5 出站仅支持 sing-box"
+        return 1
+    fi
+
+    if [[ "$1" != "noConfirm" ]]; then
+        read -r -p "是否确认卸载多 Socks5 出站、分流规则和所有清单？[y/n]:" unInstallStatus
+        if [[ "${unInstallStatus}" != "y" ]]; then
+            echoContent green " ---> 放弃卸载"
+            return 0
+        fi
+    fi
+
+    removeSingBoxConfig "00_socks5_multi_route"
+    rm -f "${singBoxConfigPath}"socks5_multi_*.json >/dev/null 2>&1
+    rm -f "$(socks5MultiIndexFile)" >/dev/null 2>&1
+    rm -rf "$(socks5MultiListDir)" >/dev/null 2>&1
+    addSingBoxPreferIPv6DirectOutbound
+    if [[ "$1" != "noConfirm" ]]; then
+        echoContent green " ---> 已卸载多 Socks5 配置"
+    fi
+}
+
 # 多 Socks5 出站菜单
 socks5MultiOutboundRoutingMenu() {
     readInstallType
@@ -7658,36 +8194,40 @@ socks5MultiOutboundRoutingMenu() {
         socks5MultiOutboundRoutingMenu
         ;;
     2)
-        echoContent yellow " ---> 多 Socks5 添加代理功能将在下一阶段实现"
+        addSocks5MultiOutbound
+        refreshSocks5MultiOutboundRouting
         socks5MultiOutboundRoutingMenu
         ;;
     3)
-        echoContent yellow " ---> 多 Socks5 编辑代理功能将在下一阶段实现"
+        editSocks5MultiOutbound
+        refreshSocks5MultiOutboundRouting
         socks5MultiOutboundRoutingMenu
         ;;
     4)
-        echoContent yellow " ---> 多 Socks5 删除代理功能将在下一阶段实现"
+        removeSocks5MultiOutbound
+        refreshSocks5MultiOutboundRouting
         socks5MultiOutboundRoutingMenu
         ;;
     5)
-        echoContent yellow " ---> 多 Socks5 代理清单管理将在后续阶段实现"
+        manageSocks5MultiRoutingList
         socks5MultiOutboundRoutingMenu
         ;;
     6)
-        showSocks5MultiOutbounds
+        showSocks5MultiRoutingRules
         socks5MultiOutboundRoutingMenu
         ;;
     7)
-        echoContent yellow " ---> 多 Socks5 刷新规则将在后续阶段实现"
+        refreshSocks5MultiOutboundRouting
         socks5MultiOutboundRoutingMenu
         ;;
     8)
-        echoContent yellow " ---> 多 Socks5 清单冲突检查将在后续阶段实现"
+        checkSocks5MultiRoutingListConflict
         socks5MultiOutboundRoutingMenu
         ;;
     9)
-        echoContent yellow " ---> 多 Socks5 卸载功能将在后续阶段实现"
-        socks5MultiOutboundRoutingMenu
+        removeSocks5MultiOutboundRouting
+        reloadCore
+        socks5Routing
         ;;
     *)
         echoContent red " ---> 选择错误"
@@ -7808,7 +8348,7 @@ setSocks5OutboundRoutingAll() {
 
     echoContent red "=============================================================="
     echoContent yellow "# 注意事项\n"
-    echoContent yellow "1.会删除所有已经设置的分流规则，包括其他分流（warp、IPv6等）"
+    echoContent yellow "1.会删除所有已经设置的分流规则，包括其他分流（WARP/WireGuard、IPv6等）"
     echoContent yellow "2.会删除Socks5之外的所有出站规则\n"
     read -r -p "是否确认设置？[y/n]:" socksOutStatus
 
@@ -7833,7 +8373,12 @@ setSocks5OutboundRoutingAll() {
             removeSingBoxConfig wireguard_endpoints_IPv4
             removeSingBoxConfig wireguard_endpoints_IPv6
 
+            removeSocks5MultiOutboundRouting noConfirm
             removeSingBoxConfig socks5_01_outbound_route
+            removeSingBoxConfig 00_socks5_vpngate_list_route
+            removeSingBoxConfig 10_socks5_direct_route
+            removeSingBoxConfig 00_socks5_direct_route
+            removeSingBoxConfig zz_socks5_ipv4_global_route
             removeSingBoxConfig 01_direct_outbound
         fi
 
@@ -7896,6 +8441,7 @@ removeSocks5Routing() {
             removeSingBoxConfig socks5_outbound
             removeSingBoxConfig socks5_01_outbound_route
             removeSingBoxSocks5CustomRouting noReload
+            removeSocks5MultiOutboundRouting noConfirm
             addSingBoxOutbound 01_direct_outbound
         fi
 
@@ -7918,6 +8464,7 @@ removeSocks5Routing() {
         if [[ -n "${singBoxConfigPath}" ]]; then
             removeSingBoxConfig socks5_outbound
             removeSingBoxConfig socks5_01_outbound_route
+            removeSocks5MultiOutboundRouting noConfirm
             removeSingBoxConfig 20_socks5_inbounds
             removeSingBoxConfig socks5_02_inbound_route
             removeSingBoxConfig sniff_socks5_inbound
@@ -7937,11 +8484,11 @@ removeSocks5Routing() {
     reloadCore
 }
 
-# 卸载Socks5出站和分流规则，包含清单、手动域名、全局Socks5出站
+# 卸载Socks5出站和分流规则，包含清单、手动域名、多出站、全局Socks5出站
 removeSocks5OutboundRouting() {
     readInstallType
     echoContent red "=============================================================="
-    echoContent yellow "# 将卸载Socks5出站、VPNGate清单、手动域名分流和全局Socks5出站规则"
+    echoContent yellow "# 将卸载Socks5出站、VPNGate清单、手动域名分流、多 Socks5 出站和全局Socks5出站规则"
     read -r -p "是否确认卸载？[y/n]:" unInstallSocks5OutboundStatus
     if [[ "${unInstallSocks5OutboundStatus}" != "y" ]]; then
         echoContent green " ---> 放弃卸载"
@@ -7961,6 +8508,7 @@ removeSocks5OutboundRouting() {
         removeSingBoxConfig "10_socks5_direct_route"
         removeSingBoxConfig "00_socks5_direct_route"
         removeSingBoxConfig "zz_socks5_ipv4_global_route"
+        removeSocks5MultiOutboundRouting noConfirm
         rm -f "$(singBoxSocks5RoutingListFile)" >/dev/null 2>&1
         addSingBoxOutbound "01_direct_outbound"
     fi
@@ -8359,7 +8907,7 @@ EOF
 # 将清单转换为sing-box route规则
 buildSingBoxSocks5RoutingListRule() {
     local listFile=$1
-    local routingName="socks5_vpngate_list"
+    local routingName="${2:-socks5_vpngate_list}"
     local domainRules=[]
     local domainSuffix=[]
     local ruleSet=[]
@@ -8428,7 +8976,8 @@ setSingBoxSocks5OutboundListRouting() {
     echoContent yellow "1.清单内域名/IP -> 强制 socks5_outbound，不暴露VPS IPv4/IPv6直连出口"
     echoContent yellow "2.清单外 -> 01_direct_outbound，使用VPS默认出口，可能暴露VPS IPv4/IPv6"
     echoContent yellow "3.会清理旧的手动Socks5/高速直连分流，避免隐私清单被direct规则影响"
-    echoContent yellow "4.清单文件：${listFile}"
+    echoContent yellow "4.如原来启用 WARP/WireGuard 全局，清单外会改为VPS默认出口"
+    echoContent yellow "5.清单文件：${listFile}"
     if [[ "$1" != "noConfirm" ]]; then
         read -r -p "是否确认生成/刷新清单分流？[y/n]:" socksListRoutingStatus
         if [[ "${socksListRoutingStatus}" != "y" ]]; then
@@ -8437,6 +8986,7 @@ setSingBoxSocks5OutboundListRouting() {
         fi
     fi
 
+    removeSocks5MultiOutboundRouting noConfirm
     addSingBoxPreferIPv6DirectOutbound
     removeSingBoxConfig "socks5_01_outbound_route"
     removeSingBoxConfig "10_socks5_direct_route"
