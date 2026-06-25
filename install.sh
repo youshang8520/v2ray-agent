@@ -579,7 +579,9 @@ readInstallProtocolType() {
             currentInstallProtocolType="${currentInstallProtocolType}11,"
             if [[ "${coreInstallType}" == "2" ]]; then
                 frontingType=11_VMess_HTTPUpgrade_inbounds
-                singBoxVMessHTTPUpgradePort=$(grep 'listen' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
+                if [[ -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" ]]; then
+                    singBoxVMessHTTPUpgradePort=$(grep 'listen' <"${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" | awk '{print $2}')
+                fi
             fi
         fi
         if echo "${row}" | grep -q socks5_inbounds; then
@@ -886,8 +888,8 @@ readConfigHostPathUUID() {
     elif [[ "${coreInstallType}" == "2" ]]; then
         if [[ -n "${frontingType}" ]]; then
             currentHost=$(jq -r .inbounds[0].tls.server_name ${configPath}${frontingType}.json)
-            if echo ${currentInstallProtocolType} | grep -q ",11," && [[ "${currentHost}" == "null" ]]; then
-                currentHost=$(grep 'server_name' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
+            if echo ${currentInstallProtocolType} | grep -q ",11," && [[ "${currentHost}" == "null" ]] && [[ -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" ]]; then
+                currentHost=$(grep 'server_name' <"${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" | awk '{print $2}')
                 currentHost=${currentHost//;/}
             fi
             currentUUID=$(jq -r .inbounds[0].users[0].uuid ${configPath}${frontingType}.json)
