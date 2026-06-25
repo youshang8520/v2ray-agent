@@ -7987,8 +7987,8 @@ setSocks5MultiOutboundRouting() {
 
     if [[ "$1" != "noConfirm" ]]; then
         echoContent yellow "# 会生成 socks5_multi_* 出站和 00_socks5_multi_route 分流规则"
-        echoContent yellow "# 多个代理按优先级从小到大匹配，清单外走 VPS 默认出口"
-        echoContent yellow "# 如原来启用 WARP/WireGuard 全局，多 Socks5 会自动覆盖其出口规则"
+        echoContent yellow "# 多个代理按优先级从小到大匹配，清单外默认保持现有 WARP/WireGuard 全局出口"
+        echoContent yellow "# 未检测到 WARP/WireGuard 全局时，清单外走 VPS 默认出口"
         read -r -p "是否确认刷新？[y/n]:" refreshStatus
         if [[ "${refreshStatus}" != "y" ]]; then
             echoContent green " ---> 放弃刷新"
@@ -8066,6 +8066,12 @@ setSocks5MultiOutboundRouting() {
         return 1
     fi
 
+    local fallbackOutbound=
+    fallbackOutbound=$(getSingBoxSocks5FallbackOutbound)
+    if [[ "${fallbackOutbound}" != "01_direct_outbound" ]]; then
+        echoContent green " ---> 检测到 WARP/WireGuard 全局出口，清单外流量继续走 ${fallbackOutbound}"
+    fi
+
     local sniffRule='{"action":"sniff","timeout":"1s"}'
     local stunRule='{"type":"logical","mode":"or","rules":[{"protocol":"stun"},{"domain_keyword":["stun","turn"]},{"domain_regex":["(^|\\.)stun\\.","(^|\\.)turn\\."]},{"network":"udp","port":[3478,5349]}],"action":"reject","method":"drop"}'
     jq -n \
@@ -8073,7 +8079,8 @@ setSocks5MultiOutboundRouting() {
         --argjson stun "${stunRule}" \
         --argjson rules "${routeRules}" \
         --argjson ruleSet "${routeRuleSet}" \
-        '{route:{rules:([$sniff,$stun] + $rules),rule_set:$ruleSet,final:"01_direct_outbound"}} | if (.route.rule_set | length) == 0 then del(.route.rule_set) else . end' \
+        --arg finalOutbound "${fallbackOutbound}" \
+        '{route:{rules:([$sniff,$stun] + $rules),rule_set:$ruleSet,final:$finalOutbound}} | if (.route.rule_set | length) == 0 then del(.route.rule_set) else . end' \
         >"${singBoxConfigPath}00_socks5_multi_route.json"
 
     echoContent green " ---> 已刷新多 Socks5 分流规则"
@@ -8904,6 +8911,45 @@ addSingBoxPreferIPv6DirectOutbound() {
 EOF
 }
 
+# 判断 sing-box WireGuard/WARP 路由是否为全局出口
+isSingBoxWireGuardGlobalRoute() {
+    local type=$1
+    local routeFile="${singBoxConfigPath}wireguard_endpoints_${type}_route.json"
+    local outboundTag="wireguard_endpoints_${type}"
+    if [[ ! -f "${routeFile}" ]]; then
+        return 1
+    fi
+    jq -e --arg outbound "${outboundTag}" '
+        [.route.rules[]?
+        | select(.outbound == $outbound)
+        | select(((.rule_set? // []) | length) == 0)
+        | select(((.domain? // []) | length) == 0)
+        | select(((.domain_suffix? // []) | length) == 0)
+        | select(((.domain_regex? // []) | length) == 0)
+        | select(((.ip_cidr? // []) | length) == 0)
+        | select(((.source_ip_cidr? // []) | length) == 0)
+        | select(((.inbound? // []) | length) == 0)] | length > 0
+    ' "${routeFile}" >/dev/null 2>&1
+}
+
+# Socks5 清单过滤模式的兜底出口；检测到 WARP/WireGuard 全局时保持 WireGuard
+getSingBoxSocks5FallbackOutbound() {
+    local type=
+    for type in IPv6 IPv4; do
+        if [[ -f "${singBoxConfigPath}wireguard_endpoints_${type}.json" ]] && isSingBoxWireGuardGlobalRoute "${type}"; then
+            echo "wireguard_endpoints_${type}"
+            return
+        fi
+    done
+    for type in IPv6 IPv4; do
+        if [[ -f "${singBoxConfigPath}wireguard_endpoints_${type}.json" && ! -f "${singBoxConfigPath}wireguard_endpoints_${type}_route.json" ]]; then
+            echo "wireguard_endpoints_${type}"
+            return
+        fi
+    done
+    echo "01_direct_outbound"
+}
+
 # 将清单转换为sing-box route规则
 buildSingBoxSocks5RoutingListRule() {
     local listFile=$1
@@ -8946,7 +8992,7 @@ buildSingBoxSocks5RoutingListRule() {
     echo "{\"domainRules\":${domainRules},\"domainSuffix\":${domainSuffix},\"ruleSet\":${ruleSet},\"ruleSetTag\":${ruleSetTag},\"ipCidrs\":${ipCidrs}}"
 }
 
-# sing-box Socks5隐私清单：清单内强制走Socks5，清单外使用VPS默认出口
+# sing-box Socks5隐私清单：清单内强制走Socks5，清单外保持现有WARP/WireGuard全局或VPS默认出口
 setSingBoxSocks5OutboundListRouting() {
     readInstallType
     if [[ -z "${singBoxConfigPath}" ]]; then
@@ -8974,10 +9020,9 @@ setSingBoxSocks5OutboundListRouting() {
     echoContent red "=============================================================="
     echoContent yellow "# 注意事项"
     echoContent yellow "1.清单内域名/IP -> 强制 socks5_outbound，不暴露VPS IPv4/IPv6直连出口"
-    echoContent yellow "2.清单外 -> 01_direct_outbound，使用VPS默认出口，可能暴露VPS IPv4/IPv6"
+    echoContent yellow "2.清单外 -> 默认保持现有 WARP/WireGuard 全局出口；未检测到则使用VPS默认出口"
     echoContent yellow "3.会清理旧的手动Socks5/高速直连分流，避免隐私清单被direct规则影响"
-    echoContent yellow "4.如原来启用 WARP/WireGuard 全局，清单外会改为VPS默认出口"
-    echoContent yellow "5.清单文件：${listFile}"
+    echoContent yellow "4.清单文件：${listFile}"
     if [[ "$1" != "noConfirm" ]]; then
         read -r -p "是否确认生成/刷新清单分流？[y/n]:" socksListRoutingStatus
         if [[ "${socksListRoutingStatus}" != "y" ]]; then
@@ -9010,6 +9055,12 @@ setSingBoxSocks5OutboundListRouting() {
     if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
         echoContent red " ---> 清单为空，请先维护清单"
         exit 0
+    fi
+
+    local fallbackOutbound=
+    fallbackOutbound=$(getSingBoxSocks5FallbackOutbound)
+    if [[ "${fallbackOutbound}" != "01_direct_outbound" ]]; then
+        echoContent green " ---> 检测到 WARP/WireGuard 全局出口，清单外流量继续走 ${fallbackOutbound}"
     fi
 
     cat <<EOF >"${singBoxConfigPath}00_socks5_vpngate_list_route.json"
@@ -9071,7 +9122,7 @@ setSingBoxSocks5OutboundListRouting() {
       }
     ],
     "rule_set": ${ruleSet},
-    "final": "01_direct_outbound"
+    "final": "${fallbackOutbound}"
   }
 }
 EOF
@@ -9088,7 +9139,7 @@ EOF
         | (.route.rules[] |= (if .ip_cidr? == [] then del(.ip_cidr) else . end))' \
         "${singBoxConfigPath}00_socks5_vpngate_list_route.json" >"${singBoxConfigPath}00_socks5_vpngate_list_route_tmp.json" && mv "${singBoxConfigPath}00_socks5_vpngate_list_route_tmp.json" "${singBoxConfigPath}00_socks5_vpngate_list_route.json"
 
-    echoContent green " ---> 已设置：隐私清单强制走Socks5，清单外使用VPS默认出口"
+    echoContent green " ---> 已设置：隐私清单强制走Socks5，清单外走 ${fallbackOutbound}"
 }
 
 # sing-box Socks5组合模式：高速域名直连
