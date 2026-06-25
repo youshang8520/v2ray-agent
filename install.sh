@@ -5999,6 +5999,27 @@ manageCDN() {
         echoContent red " ---> 未检测到可以使用的协议，仅支持ws、grpc、HTTPUpgrade相关的协议"
     fi
 }
+# 跨已安装协议检查用户字段是否重复
+checkProtocolUserValueExists() {
+    local fieldType=$1
+    local value=$2
+    local file=
+    if [[ -z "${value}" ]]; then
+        return 1
+    fi
+    for file in "${configPath}"*inbounds.json "${singBoxConfigPath}"*inbounds.json; do
+        if [[ ! -f "${file}" ]]; then
+            continue
+        fi
+        if [[ "${fieldType}" == "uuid" ]]; then
+            jq -r '.. | objects | (.id? // empty), (.uuid? // empty), (.password? // empty)' "${file}" 2>/dev/null | grep -Fxq "${value}" && return 0
+        elif [[ "${fieldType}" == "email" ]]; then
+            jq -r '.. | objects | (.email? // empty), (.name? // empty), (.username? // empty)' "${file}" 2>/dev/null | awk -F "[-]" '{print $1}' | grep -Fxq "${value}" && return 0
+        fi
+    done
+    return 1
+}
+
 # 自定义uuid
 customUUID() {
     read -r -p "请输入合法的UUID，[回车]随机UUID:" currentCustomUUID
@@ -6020,7 +6041,7 @@ customUUID() {
             checkUUID=$(jq -r --arg currentUUID "$currentCustomUUID" ".inbounds[0].users[] | select(.uuid == \$currentUUID) | .name//.username" ${configPath}${frontingType}.json)
         fi
 
-        if [[ -n "${checkUUID}" ]]; then
+        if [[ -n "${checkUUID}" ]] || checkProtocolUserValueExists uuid "${currentCustomUUID}"; then
             echoContent red " ---> UUID不可重复"
             exit 0
         fi
@@ -6049,7 +6070,7 @@ customUserEmail() {
             checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" ".inbounds[0].users[] | select(.name == \$currentEmail) | .name" ${configPath}${frontingType}.json)
         fi
 
-        if [[ -n "${checkEmail}" ]]; then
+        if [[ -n "${checkEmail}" ]] || checkProtocolUserValueExists email "${currentCustomEmail}"; then
             echoContent red " ---> email不可重复"
             exit 0
         fi
@@ -11139,6 +11160,358 @@ initXrayXHTTPort() {
     fi
 }
 
+# 协议展示名称
+protocolName() {
+    local core=$1
+    local type=$2
+    if [[ "${core}" == "1" ]]; then
+        case ${type} in
+        0) echo "VLESS+TCP+TLS_Vision" ;;
+        1) echo "VLESS+TLS+WS[仅CDN推荐]" ;;
+        3) echo "VMess+TLS+WS[仅CDN推荐]" ;;
+        4) echo "Trojan+TLS" ;;
+        7) echo "VLESS+Reality+Vision" ;;
+        12) echo "VLESS+Reality+XHTTP" ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case ${type} in
+        0) echo "VLESS+Vision+TCP" ;;
+        1) echo "VLESS+TLS+WS[仅CDN推荐]" ;;
+        3) echo "VMess+TLS+WS[仅CDN推荐]" ;;
+        4) echo "Trojan+TLS" ;;
+        6) echo "Hysteria2" ;;
+        7) echo "VLESS+Reality+Vision" ;;
+        8) echo "VLESS+Reality+gRPC" ;;
+        9) echo "Tuic" ;;
+        10) echo "Naive" ;;
+        11) echo "VMess+TLS+HTTPUpgrade" ;;
+        13) echo "AnyTLS" ;;
+        esac
+    fi
+}
+
+# 协议配置文件
+protocolConfigFile() {
+    local core=$1
+    local type=$2
+    if [[ "${core}" == "1" ]]; then
+        case ${type} in
+        0) echo "${configPath}02_VLESS_TCP_inbounds.json" ;;
+        1) echo "${configPath}03_VLESS_WS_inbounds.json" ;;
+        3) echo "${configPath}05_VMess_WS_inbounds.json" ;;
+        4) echo "${configPath}04_trojan_TCP_inbounds.json" ;;
+        7) echo "${configPath}07_VLESS_vision_reality_inbounds.json" ;;
+        12) echo "${configPath}12_VLESS_XHTTP_inbounds.json" ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case ${type} in
+        0) echo "${singBoxConfigPath}02_VLESS_TCP_inbounds.json" ;;
+        1) echo "${singBoxConfigPath}03_VLESS_WS_inbounds.json" ;;
+        3) echo "${singBoxConfigPath}05_VMess_WS_inbounds.json" ;;
+        4) echo "${singBoxConfigPath}04_trojan_TCP_inbounds.json" ;;
+        6) echo "${singBoxConfigPath}06_hysteria2_inbounds.json" ;;
+        7) echo "${singBoxConfigPath}07_VLESS_vision_reality_inbounds.json" ;;
+        8) echo "${singBoxConfigPath}08_VLESS_vision_gRPC_inbounds.json" ;;
+        9) echo "${singBoxConfigPath}09_tuic_inbounds.json" ;;
+        10) echo "${singBoxConfigPath}10_naive_inbounds.json" ;;
+        11) echo "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json" ;;
+        13) echo "${singBoxConfigPath}13_anytls_inbounds.json" ;;
+        esac
+    fi
+}
+
+# 当前核心支持的协议编号
+protocolListByCore() {
+    local core=$1
+    if [[ "${core}" == "1" ]]; then
+        echo "0 1 3 4 7 12"
+    elif [[ "${core}" == "2" ]]; then
+        echo "0 1 3 4 6 7 8 9 10 11 13"
+    fi
+}
+
+# 校验当前核心是否支持协议
+protocolSupported() {
+    local core=$1
+    local type=$2
+    [[ -n "$(protocolName "${core}" "${type}")" ]]
+}
+
+# 需要TLS证书的协议
+protocolNeedsTLS() {
+    local core=$1
+    local type=$2
+    if [[ "${core}" == "1" ]]; then
+        echo " 0 1 3 4 " | grep -q " ${type} "
+    elif [[ "${core}" == "2" ]]; then
+        echo " 0 1 3 4 6 9 10 11 13 " | grep -q " ${type} "
+    else
+        return 1
+    fi
+}
+
+# 需要生成Path/Nginx前置路径的协议
+protocolNeedsPath() {
+    local core=$1
+    local type=$2
+    if [[ "${core}" == "1" ]]; then
+        echo " 1 3 12 " | grep -q " ${type} "
+    elif [[ "${core}" == "2" ]]; then
+        echo " 1 3 11 " | grep -q " ${type} "
+    else
+        return 1
+    fi
+}
+
+# Xray WS/VMess/Trojan 依赖VLESS TCP前置，独立补装时自动补齐0
+xrayStandaloneInstallTypes() {
+    local type=$1
+    if echo " 1 3 4 " | grep -q " ${type} "; then
+        echo ",0,${type},"
+    else
+        echo ",${type},"
+    fi
+}
+
+# 展示当前核心支持的协议
+showProtocolListByCore() {
+    local core=$1
+    local type=
+    for type in $(protocolListByCore "${core}"); do
+        echoContent yellow "${type}.$(protocolName "${core}" "${type}")"
+    done
+}
+
+# 规范化协议选择
+normalizeProtocolSelection() {
+    local selection=$1
+    if echo "${selection}" | grep -q "，"; then
+        echoContent red " ---> 请使用英文逗号分隔"
+        return 1
+    fi
+    selection=$(echo "${selection}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -z "${selection}" ]]; then
+        echoContent red " ---> 协议编号不可为空"
+        return 1
+    fi
+    if ! echo "${selection//,/}" | grep -Eq '^[0-9]+$'; then
+        echoContent red " ---> 协议编号不合法"
+        return 1
+    fi
+    if [[ "${selection: -1}" != "," ]]; then
+        selection="${selection},"
+    fi
+    if [[ "${selection:0:1}" != "," ]]; then
+        selection=",${selection}"
+    fi
+    echo "${selection}"
+}
+
+# 准备独立协议安装的通用上下文
+prepareStandaloneProtocolInstall() {
+    local core=$1
+    local typeList=$2
+    readInstallProtocolType
+    readConfigHostPathUUID
+    readSingBoxConfig
+
+    if [[ -z "${domain}" && -n "${currentHost}" ]]; then
+        domain=${currentHost}
+    fi
+
+    local type=
+    local needTLS=false
+    local needPath=false
+    while read -r type; do
+        if [[ -z "${type}" ]]; then
+            continue
+        fi
+        if protocolNeedsTLS "${core}" "${type}"; then
+            needTLS=true
+        fi
+        if protocolNeedsPath "${core}" "${type}"; then
+            needPath=true
+        fi
+    done < <(echo "${typeList}" | tr ',' '\n')
+
+    if [[ "${needTLS}" == "true" ]]; then
+        if [[ -z "${domain}" ]]; then
+            read -r -p "请输入需要使用证书的域名:" domain
+            if [[ -z "${domain}" ]]; then
+                echoContent red " ---> 域名不可为空"
+                return 1
+            fi
+        fi
+        if [[ ! -f "/etc/v2ray-agent/tls/${domain}.crt" || ! -f "/etc/v2ray-agent/tls/${domain}.key" ]]; then
+            totalProgress=4
+            initTLSNginxConfig 1
+            installTLS 2
+        fi
+    fi
+
+    if [[ "${needPath}" == "true" ]]; then
+        randomPathFunction
+    fi
+
+    lastInstallationConfig=true
+    return 0
+}
+
+# 独立补装sing-box协议
+installSingBoxProtocolStandalone() {
+    local typeList=$1
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        echoContent red " ---> 未检测到sing-box，请先安装sing-box核心"
+        return 1
+    fi
+    prepareStandaloneProtocolInstall "2" "${typeList}" || return 1
+    selectCustomInstallType="${typeList}"
+    totalProgress=4
+    installSingBox 1
+    installSingBoxService 2
+    initSingBoxConfig custom 3 true
+    reloadCore
+    readInstallProtocolType
+    subscribe false
+    showAccounts 4
+}
+
+# 独立补装Xray-core协议
+installXrayProtocolStandalone() {
+    local typeList=$1
+    if [[ -z "${configPath}" || "${coreInstallType}" != "1" ]]; then
+        echoContent red " ---> 未检测到Xray-core，请先安装Xray-core核心"
+        return 1
+    fi
+    prepareStandaloneProtocolInstall "1" "${typeList}" || return 1
+    selectCustomInstallType="${typeList}"
+    totalProgress=4
+    local routingBackup=
+    routingBackup=$(mktemp)
+    if [[ -f "${configPath}09_routing.json" ]]; then
+        cp "${configPath}09_routing.json" "${routingBackup}"
+    fi
+    installXray 1 false
+    installXrayService 2
+    initXrayConfig custom 3 true
+    if [[ -s "${routingBackup}" ]]; then
+        cp "${routingBackup}" "${configPath}09_routing.json"
+    fi
+    rm -f "${routingBackup}" >/dev/null 2>&1
+    reloadCore
+    readInstallProtocolType
+    subscribe false
+    showAccounts 4
+}
+
+# 删除单个协议配置
+removeProtocolConfig() {
+    local core=$1
+    local type=$2
+    local configFile=
+    configFile=$(protocolConfigFile "${core}" "${type}")
+    if [[ -n "${configFile}" && -f "${configFile}" ]]; then
+        rm -f "${configFile}" >/dev/null 2>&1
+        echoContent green " ---> 已删除 $(protocolName "${core}" "${type}") 配置"
+    else
+        echoContent yellow " ---> 未检测到 $(protocolName "${core}" "${type}") 配置"
+    fi
+}
+
+# 协议补装/重装/卸载
+handleStandaloneProtocols() {
+    local action=$1
+    readInstallType
+    if [[ -z "${coreInstallType}" ]]; then
+        echoContent red " ---> 未检测到已安装核心，请先安装Xray-core或sing-box"
+        return 1
+    fi
+
+    echoContent yellow "当前核心：$([[ "${coreInstallType}" == "1" ]] && echo Xray-core || echo sing-box)"
+    showProtocolListByCore "${coreInstallType}"
+    read -r -p "请输入协议编号[可多选，英文逗号分隔]:" selectedProtocols
+    selectedProtocols=$(normalizeProtocolSelection "${selectedProtocols}") || return 1
+
+    local type=
+    local installTypes=""
+    while read -r type; do
+        if [[ -z "${type}" ]]; then
+            continue
+        fi
+        if ! protocolSupported "${coreInstallType}" "${type}"; then
+            echoContent red " ---> 当前核心不支持协议编号 ${type}，已跳过"
+            continue
+        fi
+        if [[ "${action}" == "remove" || "${action}" == "reinstall" ]]; then
+            removeProtocolConfig "${coreInstallType}" "${type}"
+        fi
+        if [[ "${action}" == "install" || "${action}" == "reinstall" ]]; then
+            if [[ "${coreInstallType}" == "1" ]]; then
+                installTypes="${installTypes}$(xrayStandaloneInstallTypes "${type}" | tr ',' '\n' | grep -v '^$' | paste -sd ',')"
+                installTypes="${installTypes},"
+            else
+                installTypes="${installTypes}${type},"
+            fi
+        fi
+    done < <(echo "${selectedProtocols}" | tr ',' '\n')
+
+    if [[ "${action}" == "remove" ]]; then
+        reloadCore
+        readInstallProtocolType
+        subscribe false
+        echoContent green " ---> 协议卸载完成，订阅已更新"
+        return 0
+    fi
+
+    installTypes=$(echo "${installTypes}" | tr ',' '\n' | grep -v '^$' | awk '!seen[$0]++' | paste -sd ',')
+    if [[ -z "${installTypes}" ]]; then
+        echoContent red " ---> 没有可安装的协议"
+        return 1
+    fi
+    installTypes=",${installTypes},"
+
+    if [[ "${coreInstallType}" == "1" ]]; then
+        installXrayProtocolStandalone "${installTypes}"
+    else
+        installSingBoxProtocolStandalone "${installTypes}"
+    fi
+}
+
+# 统一协议管理菜单
+manageProtocols() {
+    readInstallType
+    echoContent skyBlue "\n功能 1/1 : 协议管理"
+    echoContent red "\n=============================================================="
+    echoContent yellow "1.查看已安装协议"
+    echoContent yellow "2.新增/补装协议"
+    echoContent yellow "3.重装协议"
+    echoContent yellow "4.卸载协议"
+    echoContent yellow "5.返回主菜单"
+    echoContent red "=============================================================="
+    read -r -p "请选择:" protocolManageStatus
+    case ${protocolManageStatus} in
+    1)
+        showInstallStatus
+        ;;
+    2)
+        handleStandaloneProtocols install
+        ;;
+    3)
+        handleStandaloneProtocols reinstall
+        ;;
+    4)
+        handleStandaloneProtocols remove
+        ;;
+    5)
+        menu
+        ;;
+    *)
+        echoContent red " ---> 选择错误"
+        manageProtocols
+        ;;
+    esac
+}
+
 # reality管理
 manageReality() {
     readInstallProtocolType
@@ -11377,6 +11750,7 @@ menu() {
     echoContent yellow "11.分流工具"
     echoContent yellow "12.添加新端口"
     echoContent yellow "13.BT下载管理"
+    echoContent yellow "14.协议管理"
     echoContent yellow "15.域名黑名单"
     echoContent skyBlue "-------------------------版本管理-----------------------------"
     echoContent yellow "16.core管理"
@@ -11429,7 +11803,7 @@ menu() {
         btTools 1
         ;;
     14)
-        switchAlpn 1
+        manageProtocols
         ;;
     15)
         blacklist 1

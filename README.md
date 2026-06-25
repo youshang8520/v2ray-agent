@@ -28,7 +28,19 @@ Xray-core/sing-box 一键脚本快速安装
 
 ### 安装脚本版
 
-本 fork 的脚本版包含 sing-box Socks5/VPNGate 清单分流增强。
+本 fork 的脚本版包含 sing-box Socks5/VPNGate 清单分流增强、V2 入站流量隔离、Socks5/WireGuard 共存路由重置，以及 Xray-core / sing-box 的统一协议补装管理。
+
+### 本 fork 增强
+
+- **V2 入站隔离的 Socks5 清单过滤：** V2 节点清单内走 Socks5/AimiliVPN，清单外走 VPS 服务器 IP；规则只匹配 V2 节点入站，不接管 WireGuard/WARP 或其它客户端流量。
+- **多 Socks5 出站：** 支持多个 Socks5 代理按清单和优先级分流，并提供清单冲突检查。
+- **Socks5/WireGuard 共存重置：** 可清理 Socks5 旧分流和冲突残留，保留 WireGuard/WARP endpoint 与 route。
+- **统一协议管理：** 在安装后可为 Xray-core / sing-box 补装、重装、卸载当前脚本已完整支持的协议，账号和订阅统一刷新。
+
+详细说明见：
+
+- [Socks5/WireGuard 共存与协议管理使用说明](documents/socks5_wireguard_protocol_management.md)
+- [开发过程与改动点](documents/development_process_socks5_protocol_management.md)
 
 ```
 wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/youshang8520/v2ray-agent/customize-singbox-socks-routing/install.sh" && chmod 700 /root/install.sh && /root/install.sh
