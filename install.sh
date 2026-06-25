@@ -8098,7 +8098,7 @@ setSocks5MultiOutboundRouting() {
     fi
 
     local sniffRule='{"action":"sniff","timeout":"1s"}'
-    local stunRule='{"type":"logical","mode":"and","rules":[{"inbound":[]},{"type":"logical","mode":"or","rules":[{"protocol":"stun"},{"domain_keyword":["stun","turn"]},{"domain_regex":["(^|\\.)stun\\.","(^|\\.)turn\\."]},{"network":"udp","port":[3478,5349]}]}],"action":"reject","method":"drop"}'
+    local stunRule='{"type":"logical","mode":"and","rules":[{"inbound":[]},{"type":"logical","mode":"or","rules":[{"protocol":"stun"},{"domain_regex":["(^|\\.)stun\\.","(^|\\.)turn\\."]},{"network":"udp","port":[3478,5349]}]}],"action":"reject","method":"drop"}'
     local directFallbackRule='{"inbound":[],"outbound":"01_direct_outbound"}'
     jq -n \
         --argjson inboundTags "${proxyInboundTags}" \
@@ -9142,12 +9142,6 @@ setSingBoxSocks5OutboundListRouting() {
             "rules": [
               {
                 "protocol": "stun"
-              },
-              {
-                "domain_keyword": [
-                  "stun",
-                  "turn"
-                ]
               },
               {
                 "domain_regex": [

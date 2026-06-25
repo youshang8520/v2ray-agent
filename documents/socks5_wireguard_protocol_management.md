@@ -316,6 +316,19 @@ vasma
 
 旧版 Hysteria2/Trojan 配置可能没有 tag，刷新规则时脚本会自动补齐。
 
+### 正常业务域名 ERR_CONNECTION_CLOSED
+
+部分正常业务域名可能包含与 WebRTC TURN/STUN 相同的普通字符串。防泄漏规则不使用宽泛的 `domain_keyword` 匹配，只保留以下精确匹配：
+
+```text
+protocol: stun
+(^|\.)stun\.
+(^|\.)turn\.
+UDP 3478/5349
+```
+
+该策略用于避免正常业务域名被误判为 TURN/STUN 泄漏流量。
+
 ### 协议补装后订阅没有更新
 
 执行：
