@@ -283,6 +283,9 @@ initVar() {
     # dns ssl状态
     #    dnsSSLStatus=
 
+    # CDN推荐协议的端口：Xray前置可共用，sing-box独立入站不能共用时由各协议安装时自动选择CDN端口。
+    cdnSelectedPortList=
+
     # dns tls domain
     dnsTLSDomain=
     ipType=
@@ -735,6 +738,38 @@ allowPort() {
         fi
     fi
 }
+# 关闭防火墙端口
+closePort() {
+    local port=$1
+    local type=$2
+    if [[ -z "${type}" ]]; then
+        type=tcp
+    fi
+
+    if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
+        if ufw status | grep -q "Status: active"; then
+            sudo ufw delete allow "${port}/${type}" >/dev/null 2>&1 || true
+        fi
+    elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
+        local firewallPort=${port}
+        if echo "${firewallPort}" | grep -q ":"; then
+            firewallPort=$(echo "${firewallPort}" | awk -F ":" '{print $1"-"$2}')
+        fi
+        firewall-cmd --zone=public --remove-port="${firewallPort}/${type}" --permanent >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+    elif rc-update show 2>/dev/null | grep -q ufw; then
+        if ufw status | grep -q "Status: active"; then
+            sudo ufw delete allow "${port}/${type}" >/dev/null 2>&1 || true
+        fi
+    elif dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
+        iptables -S INPUT | grep "allow ${port}/${type}(mack-a)" | while read -r rule; do
+            local deleteRule=${rule/-A/-D}
+            iptables ${deleteRule} >/dev/null 2>&1 || true
+        done
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+}
+
 # 获取公网IP
 getPublicIP() {
     local type=4
@@ -1898,9 +1933,40 @@ acmeInstallSSL() {
         sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
     fi
 }
+# 统一的CDN推荐端口选择
+selectCdnRecommendedPort() {
+    local preferredPort=${1:-443}
+    local shareMode=$2
+    local portChoices=(443 2053 2087 2096 8443)
+    local selectedPort=${preferredPort}
+    local candidate=
+
+    if [[ -n "${selectedPort}" ]] && [[ " ${portChoices[*]} " == *" ${selectedPort} "* ]]; then
+        if ! lsof -i "tcp:${selectedPort}" | grep -q LISTEN; then
+            if [[ "${shareMode}" == "share" || ",${cdnSelectedPortList}," != *",${selectedPort},"* ]]; then
+                echo "${selectedPort}"
+                return 0
+            fi
+        fi
+    fi
+
+    for candidate in "${portChoices[@]}"; do
+        if ! lsof -i "tcp:${candidate}" | grep -q LISTEN; then
+            if [[ "${shareMode}" == "share" || ",${cdnSelectedPortList}," != *",${candidate},"* ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        fi
+    done
+
+    echoContent red " ---> CDN推荐端口 443/2053/2087/2096/8443 均不可用"
+    exit 0
+}
+
 # 自定义端口
 customPortFunction() {
     local historyCustomPortStatus=
+    local cdnRecommendedPortList="443 2053 2087 2096 8443"
     if [[ -n "${customPort}" || -n "${currentPort}" ]]; then
         echo
         if [[ -z "${lastInstallationConfig}" ]]; then
@@ -1922,6 +1988,16 @@ customPortFunction() {
             if [[ -z "${port}" ]]; then
                 port=$((RANDOM % 20001 + 10000))
             fi
+        elif echo "${selectCustomInstallType}" | grep -qE ",1,|,3,|,11,|,5,"; then
+            echoContent yellow "请输入端口[CDN推荐: 443 2053 2087 2096 8443]，回车自动选择可用CDN端口"
+            read -r -p "端口:" port
+            if [[ -z "${port}" ]]; then
+                port=$(selectCdnRecommendedPort 443 share)
+            fi
+            if ! echo " ${cdnRecommendedPortList} " | grep -q " ${port} "; then
+                echoContent red " ---> 仅CDN推荐协议请使用 443/2053/2087/2096/8443"
+                exit 0
+            fi
         else
             echo
             echoContent yellow "请输入端口[默认: 443]，可自定义端口[回车使用默认]"
@@ -1936,7 +2012,9 @@ customPortFunction() {
 
         if [[ -n "${port}" ]]; then
             if ((port >= 1 && port <= 65535)); then
-                allowPort "${port}"
+                if [[ "${port}" != "${currentPort}" ]]; then
+                    allowPort "${port}"
+                fi
                 echoContent yellow "\n ---> 端口: ${port}"
                 if [[ -z "${btDomain}" ]]; then
                     checkDNSIP "${domain}"
@@ -3893,6 +3971,9 @@ singBoxMergeConfig() {
 # 初始化sing-box端口
 initSingBoxPort() {
     local port=$1
+    local portType=$2
+    local shareMode=$3
+    local cdnRecommendedPortList="443 2053 2087 2096 8443"
     if [[ -n "${port}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次使用的端口，是否使用 ？[y/n]:" historyPort
         if [[ "${historyPort}" != "y" ]]; then
@@ -3904,9 +3985,21 @@ initSingBoxPort() {
         echo "${port}"
     fi
     if [[ -z "${port}" ]]; then
-        read -r -p '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port
-        if [[ -z "${port}" ]]; then
-            port=$((RANDOM % 50001 + 10000))
+        if [[ "${portType}" == "cdn" ]]; then
+            read -r -p '请输入CDN推荐端口[443/2053/2087/2096/8443]，[回车]优先使用443:' port
+            if [[ -z "${port}" ]]; then
+                port=$(selectCdnRecommendedPort 443 "${shareMode}")
+            fi
+            if ! echo " ${cdnRecommendedPortList} " | grep -q " ${port} "; then
+                echoContent red " ---> 仅CDN推荐协议请使用 443/2053/2087/2096/8443"
+                exit 0
+            fi
+            cdnSelectedPortList="${cdnSelectedPortList}${port},"
+        else
+            read -r -p '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port
+            if [[ -z "${port}" ]]; then
+                port=$((RANDOM % 50001 + 10000))
+            fi
         fi
         if ((port >= 1 && port <= 65535)); then
             allowPort "${port}"
@@ -4485,7 +4578,7 @@ EOF
         echoContent yellow "\n===================== 配置VLESS+WS =====================\n"
         echoContent skyBlue "\n开始配置VLESS+WS协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVLESSWSPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVLESSWSPort}" cdn unique)
         echoContent green "\n ---> VLESS_WS端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -4526,7 +4619,7 @@ EOF
         echoContent yellow "\n===================== 配置VMess+ws =====================\n"
         echoContent skyBlue "\n开始配置VMess+ws协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVMessWSPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVMessWSPort}" cdn unique)
         echoContent green "\n ---> VMess_ws端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -4780,7 +4873,7 @@ EOF
         echoContent yellow "\n===================== 配置VMess+HTTPUpgrade =====================\n"
         echoContent skyBlue "\n开始配置VMess+HTTPUpgrade协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVMessHTTPUpgradePort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVMessHTTPUpgradePort}" cdn unique)
         echoContent green "\n ---> VMess_HTTPUpgrade端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -11318,6 +11411,7 @@ prepareStandaloneProtocolInstall() {
     local type=
     local needTLS=false
     local needPath=false
+    local needCdnPort=false
     while read -r type; do
         if [[ -z "${type}" ]]; then
             continue
@@ -11327,6 +11421,9 @@ prepareStandaloneProtocolInstall() {
         fi
         if protocolNeedsPath "${core}" "${type}"; then
             needPath=true
+        fi
+        if [[ "${core}" == "1" ]] && echo " 1 3 5 11 " | grep -q " ${type} "; then
+            needCdnPort=true
         fi
     done < <(echo "${typeList}" | tr ',' '\n')
 
@@ -11347,6 +11444,10 @@ prepareStandaloneProtocolInstall() {
 
     if [[ "${needPath}" == "true" ]]; then
         randomPathFunction
+    fi
+
+    if [[ "${needCdnPort}" == "true" ]]; then
+        currentDefaultPort=$(selectCdnRecommendedPort "${currentDefaultPort:-443}" share)
     fi
 
     lastInstallationConfig=true
@@ -11412,6 +11513,9 @@ removeProtocolConfig() {
     else
         echoContent yellow " ---> 未检测到 $(protocolName "${core}" "${type}") 配置"
     fi
+    if [[ "${core}" == "2" && "${type}" == "11" ]]; then
+        rm -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
+    fi
 }
 
 # 协议补装/重装/卸载
@@ -11430,6 +11534,7 @@ handleStandaloneProtocols() {
 
     local type=
     local installTypes=""
+    local cleanupPorts=""
     while read -r type; do
         if [[ -z "${type}" ]]; then
             continue
@@ -11439,6 +11544,9 @@ handleStandaloneProtocols() {
             continue
         fi
         if [[ "${action}" == "remove" || "${action}" == "reinstall" ]]; then
+            if [[ "${coreInstallType}" == "2" && "${type}" == "11" ]]; then
+                cleanupPorts="${cleanupPorts}${singBoxVMessHTTPUpgradePort},"
+            fi
             removeProtocolConfig "${coreInstallType}" "${type}"
         fi
         if [[ "${action}" == "install" || "${action}" == "reinstall" ]]; then
@@ -11455,6 +11563,14 @@ handleStandaloneProtocols() {
         reloadCore
         readInstallProtocolType
         subscribe false
+        if [[ -n "${cleanupPorts}" ]]; then
+            cleanupPorts=$(echo "${cleanupPorts}" | tr ',' '\n' | grep -v '^$' | awk '!seen[$0]++' | paste -sd ',')
+            for type in $(echo "${cleanupPorts}" | tr ',' ' '); do
+                if [[ -n "${type}" ]]; then
+                    closePort "${type}" tcp
+                fi
+            done
+        fi
         echoContent green " ---> 协议卸载完成，订阅已更新"
         return 0
     fi
