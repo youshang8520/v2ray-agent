@@ -78,6 +78,24 @@ is_listening() {
     listening_ports | grep -qx "${port}/${proto}"
 }
 
+listening_ports_with_procs() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -lntup | awk '{
+            n = split($5, a, ":"); port = a[n]; proto = $1; proc = ""
+            for (i = 1; i <= NF; i++) if ($i ~ /users:/) {
+                s = $i; sub(/.*\(\("/, "", s); sub(/".*/, "", s); proc = s; break
+            }
+            if (port + 0 > 0) print port "/" proto " " proc
+        }' | sort -t/ -k1,1n -u
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -lntup 2>/dev/null | awk 'NR > 2 {
+            n = split($4, a, ":"); port = a[n]; proto = tolower($1)
+            split($NF, p, "/"); proc = (length(p) > 1) ? p[2] : ""
+            if (port + 0 > 0) print port "/" proto " " proc
+        }' | sort -t/ -k1,1n -u
+    fi
+}
+
 ssh_ports() {
     local ports=""
     if [[ -n "${SSH_CONNECTION:-}" ]]; then
@@ -178,7 +196,7 @@ cmd_list() {
     log "Protected ports: $(protected_ports | paste -sd, -)"
     log ""
     log "Listening ports:"
-    listening_ports | sed 's/^/  /' || true
+    listening_ports_with_procs | awk '{printf "  %-16s %s\n", $1, $2}' || true
     log ""
     log "Firewall allowed ports:"
     firewall_ports | sed 's/^/  /' || true
@@ -189,7 +207,8 @@ cmd_check() {
     valid_port "${port}" || { err "invalid port: ${port}"; exit 1; }
     valid_proto "${proto}" || { err "invalid proto: ${proto}"; exit 1; }
     if is_listening "${port}" "${proto}"; then
-        log "listening: yes"
+        proc=$(listening_ports_with_procs | awk -v k="${port}/${proto}" '$1==k {print $2; exit}')
+        log "listening: yes  (${proc:-unknown})"
     else
         log "listening: no"
     fi
