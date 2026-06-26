@@ -7715,27 +7715,39 @@ socks5Routing() {
     [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}20_socks5_inbounds.json" ]] && _s5in=" [已安装]"
     { [[ -f "${configPath:-}socks5_outbound.json" ]] || [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; } && [[ -z "${_s5multi}" ]] && _s5out=" [已安装]"
 
-    echoContent yellow "1.单 Socks5 出站${_s5out}"
-    echoContent yellow "2.多 Socks5 出站${_s5multi}"
-    echoContent yellow "3.Socks5入站${_s5in}"
-    echoContent yellow "4.卸载"
-    echoContent yellow "5.重置Socks5/WireGuard共存路由"
+    echoContent yellow "1.单出站${_s5out}  （一个Socks5，按清单分流）"
+    echoContent yellow "2.多出站${_s5multi}  （多个Socks5，各自独立清单）"
+    echoContent yellow "3.全局转发  （所有V2流量走Socks5，不按清单）"
+    echoContent yellow "4.Socks5入站${_s5in}"
+    echoContent yellow "5.卸载所有Socks5配置"
+    echoContent yellow "6.重置路由共存  （修复WireGuard/WARP冲突）"
     read -r -p "请选择:" selectType
 
     case ${selectType} in
     1)
+        # 未安装时自动完成配置+启用，已安装直接进管理菜单
+        if [[ ! -f "${configPath:-}socks5_outbound.json" ]] && [[ -z "${singBoxConfigPath:-}" || ! -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
+            setSocks5Outbound
+            setSingBoxSocks5OutboundListRouting noConfirm
+            reloadCore
+        fi
         socks5OutboundRoutingMenu
         ;;
     2)
         socks5MultiOutboundRoutingMenu
         ;;
     3)
-        socks5InboundRoutingMenu
+        setSocks5Outbound
+        setSocks5OutboundRoutingAll
+        reloadCore
         ;;
     4)
-        removeSocks5Routing
+        socks5InboundRoutingMenu
         ;;
     5)
+        removeSocks5Routing
+        ;;
+    6)
         resetSocks5WireGuardRouteIsolation
         ;;
     *)
@@ -8063,10 +8075,9 @@ manageSocks5MultiRoutingList() {
     echoContent skyBlue "\n功能 1/1 : 管理 ${alias} 清单"
     echoContent red "\n=============================================================="
     echoContent yellow "1.查看清单"
-    echoContent yellow "2.追加清单"
-    echoContent yellow "3.替换清单"
-    echoContent yellow "4.清空清单"
-    echoContent yellow "5.从清单生成/刷新分流规则"
+    echoContent yellow "2.追加清单（自动刷新规则）"
+    echoContent yellow "3.替换清单（自动刷新规则）"
+    echoContent yellow "4.清空清单（自动刷新规则）"
     read -r -p "请选择:" listManageStatus
 
     case ${listManageStatus} in
@@ -8083,7 +8094,7 @@ manageSocks5MultiRoutingList() {
         fi
         echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
         awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
-        echoContent green " ---> 追加完成"
+        echoContent green " ---> 追加完成，规则已自动刷新"
         refreshSocks5MultiOutboundRouting
         ;;
     3)
@@ -8094,19 +8105,16 @@ manageSocks5MultiRoutingList() {
             return 1
         fi
         echo "${replaceList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >"${listFile}"
-        echoContent green " ---> 替换完成"
+        echoContent green " ---> 替换完成，规则已自动刷新"
         refreshSocks5MultiOutboundRouting
         ;;
     4)
         read -r -p "是否确认清空 ${alias} 清单？[y/n]:" clearStatus
         if [[ "${clearStatus}" == "y" ]]; then
             : >"${listFile}"
-            echoContent green " ---> 已清空"
+            echoContent green " ---> 已清空，规则已自动刷新"
             refreshSocks5MultiOutboundRouting
         fi
-        ;;
-    5)
-        refreshSocks5MultiOutboundRouting
         ;;
     *)
         echoContent red " ---> 选择错误"
@@ -8385,9 +8393,9 @@ socks5MultiOutboundRoutingMenu() {
     echoContent yellow "2.添加代理"
     echoContent yellow "3.编辑代理"
     echoContent yellow "4.删除代理"
-    echoContent yellow "5.管理代理清单"
+    echoContent yellow "5.维护代理清单（增删/清空，修改后自动刷新规则）"
     echoContent yellow "6.查看分流规则"
-    echoContent yellow "7.刷新规则"
+    echoContent yellow "7.重新应用规则（手动触发，修改清单已自动刷新无需使用）"
     echoContent yellow "8.检查清单冲突"
     echoContent yellow "9.卸载多 Socks5 配置"
     read -r -p "请选择:" selectType
@@ -8499,29 +8507,28 @@ socks5InboundRoutingMenu() {
 
 # Socks5出站菜单
 socks5OutboundRoutingMenu() {
-    echoContent skyBlue "\n功能 1/1 : Socks5出站"
-    echoContent red "\n=============================================================="
+    local _s5configured=""
+    { [[ -f "${configPath:-}socks5_outbound.json" ]] || [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; } && _s5configured="1"
 
-    echoContent skyBlue "隐私清单模式：清单内强制走Socks5；清单外走VPS默认直连"
-    echoContent yellow "1.启用/刷新Socks5隐私清单"
-    echoContent yellow "2.Socks5全局转发"
-    echoContent yellow "3.查看分流规则"
-    echoContent yellow "4.卸载分流规则"
-    echoContent yellow "5.维护隐私清单"
+    echoContent skyBlue "\n功能 1/1 : 单出站管理"
+    echoContent red "\n=============================================================="
+    echoContent skyBlue "清单内 → Socks5出站；清单外 → VPS直连"
+    if [[ -n "${_s5configured}" ]]; then
+        echoContent yellow "1.重新配置出站IP/端口"
+    else
+        echoContent yellow "1.配置出站IP/端口"
+    fi
+    echoContent yellow "2.查看分流规则"
+    echoContent yellow "3.维护隐私清单（增删/重置，修改后自动刷新规则）"
     read -r -p "请选择:" selectType
     case ${selectType} in
     1)
-        setSingBoxSocks5OutboundListRouting
+        setSocks5Outbound
+        setSingBoxSocks5OutboundListRouting noConfirm
         reloadCore
         socks5OutboundRoutingMenu
         ;;
     2)
-        setSocks5Outbound
-        setSocks5OutboundRoutingAll
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    3)
         if [[ -n "${singBoxConfigPath}" ]]; then
             showSingBoxSocks5CustomRouting
         else
@@ -8530,12 +8537,7 @@ socks5OutboundRoutingMenu() {
         showXrayRoutingRules socks5_outbound
         socks5OutboundRoutingMenu
         ;;
-    4)
-        removeSocks5OutboundRouting
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    5)
+    3)
         manageSingBoxSocks5RoutingList
         socks5OutboundRoutingMenu
         ;;
@@ -9186,6 +9188,11 @@ setSingBoxSocks5OutboundListRouting() {
             echoContent red " ---> 请先安装Socks5出站"
             exit 0
         fi
+    else
+        read -r -p "是否重新配置出站IP/端口？（直接回车跳过，仅刷新规则）[y/n]:" reconfigSocks5Status
+        if [[ "${reconfigSocks5Status}" == "y" ]]; then
+            setSocks5Outbound
+        fi
     fi
 
     local listFile=
@@ -9444,8 +9451,7 @@ manageSingBoxSocks5RoutingList() {
     echoContent yellow "1.查看清单"
     echoContent yellow "2.追加清单"
     echoContent yellow "3.替换清单"
-    echoContent yellow "4.重置默认清单"
-    echoContent yellow "5.从清单生成/刷新分流规则"
+    echoContent yellow "4.重置默认清单（并自动刷新规则）"
     read -r -p "请选择:" listManageStatus
 
     case ${listManageStatus} in
@@ -9462,7 +9468,7 @@ manageSingBoxSocks5RoutingList() {
         fi
         echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
         awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
-        echoContent green " ---> 追加完成"
+        echoContent green " ---> 追加完成，规则已自动刷新"
         refreshSingBoxSocks5RoutingList
         ;;
     3)
@@ -9478,10 +9484,7 @@ manageSingBoxSocks5RoutingList() {
         ;;
     4)
         writeDefaultSingBoxSocks5RoutingList
-        echoContent green " ---> 已重置默认清单"
-        refreshSingBoxSocks5RoutingList
-        ;;
-    5)
+        echoContent green " ---> 已重置默认清单，正在刷新规则..."
         refreshSingBoxSocks5RoutingList
         ;;
     *)
