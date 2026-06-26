@@ -11541,7 +11541,7 @@ showProtocolListByCore() {
     local core=$1
     local type=
     for type in $(protocolListByCore "${core}"); do
-        if echo "${currentInstallProtocolType}" | grep -q ",${type},"; then
+        if echo ",${currentInstallProtocolType}" | grep -q ",${type},"; then
             echoContent yellow "${type}.$(protocolName "${core}" "${type}") [已安装]"
         else
             echoContent yellow "${type}.$(protocolName "${core}" "${type}")"
