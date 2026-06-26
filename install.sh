@@ -7624,10 +7624,19 @@ routingToolsMenu() {
     echoContent yellow "# 注意事项"
     echoContent yellow "# 用于服务端的流量分流，可用于解锁ChatGPT、流媒体等相关内容\n"
 
+    local _s5=""
+    if [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}00_socks5_multi_route.json" ]]; then
+        _s5="多出站"
+    elif [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}20_socks5_inbounds.json" ]]; then
+        _s5="入站"
+    elif [[ -f "${configPath:-}socks5_outbound.json" ]] || [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
+        _s5="单出站"
+    fi
+
     echoContent yellow "1.WARP分流【第三方 IPv4】"
     echoContent yellow "2.WARP分流【第三方 IPv6】"
     echoContent yellow "3.IPv6分流"
-    echoContent yellow "4.Socks5分流【替换任意门分流】"
+    echoContent yellow "4.Socks5分流【替换任意门分流】${_s5:+  [当前：${_s5}]}"
     echoContent yellow "5.DNS分流"
     #    echoContent yellow "6.VMess+WS+TLS分流"
     echoContent yellow "7.SNI反向代理分流"
@@ -7701,9 +7710,14 @@ socks5Routing() {
     echoContent yellow "# 单 Socks5、多 Socks5、全局等模式可直接覆盖安装，脚本会自动清理冲突配置。"
     echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000#heading-5 \n"
 
-    echoContent yellow "1.单 Socks5 出站"
-    echoContent yellow "2.多 Socks5 出站"
-    echoContent yellow "3.Socks5入站"
+    local _s5multi="" _s5in="" _s5out=""
+    [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}00_socks5_multi_route.json" ]] && _s5multi=" [已安装]"
+    [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}20_socks5_inbounds.json" ]] && _s5in=" [已安装]"
+    { [[ -f "${configPath:-}socks5_outbound.json" ]] || [[ -n "${singBoxConfigPath:-}" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; } && [[ -z "${_s5multi}" ]] && _s5out=" [已安装]"
+
+    echoContent yellow "1.单 Socks5 出站${_s5out}"
+    echoContent yellow "2.多 Socks5 出站${_s5multi}"
+    echoContent yellow "3.Socks5入站${_s5in}"
     echoContent yellow "4.卸载"
     echoContent yellow "5.重置Socks5/WireGuard共存路由"
     read -r -p "请选择:" selectType
