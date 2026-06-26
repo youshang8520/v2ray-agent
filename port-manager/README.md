@@ -2,16 +2,36 @@
 
 `port-manager.sh` 是独立端口工具，不接管系统端口策略，只提供检查、开放、关闭和空闲端口扫描。
 
-## 用法
+## 快速用法
+
+把脚本放到任意目录后直接执行：
 
 ```bash
-bash port-manager.sh list
-bash port-manager.sh check 2053 tcp
-bash port-manager.sh open 2053 tcp
-bash port-manager.sh close 2053 tcp
-bash port-manager.sh scan
-bash port-manager.sh scan --close
-bash port-manager.sh free 20000 50000 tcp
+chmod +x port-manager.sh
+./port-manager.sh list
+./port-manager.sh scan
+./port-manager.sh open 2053 tcp
+./port-manager.sh close 2053 tcp
+```
+
+如果想更方便，可以做一个软链接：
+
+```bash
+sudo ln -s /path/to/port-manager.sh /usr/local/bin/port-manager
+port-manager list
+port-manager check 2053 tcp
+```
+
+## 常用命令
+
+```bash
+port-manager list
+port-manager check 2053 tcp
+port-manager open 2053 tcp
+port-manager close 2053 tcp
+port-manager scan
+port-manager scan --close
+port-manager free 20000 50000 tcp
 ```
 
 ## 保护规则
@@ -27,7 +47,7 @@ bash port-manager.sh free 20000 50000 tcp
 额外保护端口可通过环境变量指定：
 
 ```bash
-PORT_MANAGER_PROTECT="2053,2087" bash port-manager.sh scan
+PORT_MANAGER_PROTECT="2053,2087" port-manager scan
 ```
 
 关闭保护端口需要显式 `--force`。
