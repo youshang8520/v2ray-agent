@@ -1937,7 +1937,7 @@ acmeInstallSSL() {
 selectCdnRecommendedPort() {
     local preferredPort=${1:-443}
     local shareMode=$2
-    local portChoices=(443 2053 2087 2096 8443)
+    local portChoices=(2053 2087 2096 8443 443)
     local selectedPort=${preferredPort}
     local candidate=
 
@@ -1989,14 +1989,15 @@ customPortFunction() {
                 port=$((RANDOM % 20001 + 10000))
             fi
         elif echo "${selectCustomInstallType}" | grep -qE ",1,|,3,|,11,|,5,"; then
-            echoContent yellow "请输入端口[CDN推荐: 443 2053 2087 2096 8443]，回车自动选择可用CDN端口"
+            echoContent yellow "请输入端口[CDN推荐: 443 2053 2087 2096 8443]，回车自动选择非443可用CDN端口"
             read -r -p "端口:" port
             if [[ -z "${port}" ]]; then
-                port=$(selectCdnRecommendedPort 443 share)
-            fi
-            if ! echo " ${cdnRecommendedPortList} " | grep -q " ${port} "; then
-                echoContent red " ---> 仅CDN推荐协议请使用 443/2053/2087/2096/8443"
-                exit 0
+                port=$(selectCdnRecommendedPort 2053 share)
+            else
+                if ! echo " ${cdnRecommendedPortList} " | grep -q " ${port} "; then
+                    echoContent red " ---> 仅CDN推荐协议请使用 443/2053/2087/2096/8443"
+                    exit 0
+                fi
             fi
         else
             echo
@@ -3986,13 +3987,19 @@ initSingBoxPort() {
     fi
     if [[ -z "${port}" ]]; then
         if [[ "${portType}" == "cdn" ]]; then
-            read -r -p '请输入CDN推荐端口[443/2053/2087/2096/8443]，[回车]优先使用443:' port
+            read -r -p '请输入CDN推荐端口[443/2053/2087/2096/8443]，[回车]优先使用非443端口:' port
             if [[ -z "${port}" ]]; then
-                port=$(selectCdnRecommendedPort 443 "${shareMode}")
-            fi
-            if ! echo " ${cdnRecommendedPortList} " | grep -q " ${port} "; then
-                echoContent red " ---> 仅CDN推荐协议请使用 443/2053/2087/2096/8443"
-                exit 0
+                port=$(selectCdnRecommendedPort 2053 "${shareMode}")
+            else
+                if ! echo " ${cdnRecommendedPortList} " | grep -q " ${port} "; then
+                    echoContent red " ---> 仅CDN推荐协议请使用 443/2053/2087/2096/8443"
+                    exit 0
+                fi
+                if lsof -i "tcp:${port}" | grep -q LISTEN; then
+                    echoContent red " ---> ${port}端口已被占用，请选择其他CDN推荐端口"
+                    lsof -i "tcp:${port}" | grep LISTEN
+                    exit 0
+                fi
             fi
             cdnSelectedPortList="${cdnSelectedPortList}${port},"
         else
@@ -4579,6 +4586,7 @@ EOF
         echoContent skyBlue "\n开始配置VLESS+WS协议端口"
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVLESSWSPort}" cdn unique)
+        cdnSelectedPortList="${cdnSelectedPortList}${result[-1]},"
         echoContent green "\n ---> VLESS_WS端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -4620,6 +4628,7 @@ EOF
         echoContent skyBlue "\n开始配置VMess+ws协议端口"
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVMessWSPort}" cdn unique)
+        cdnSelectedPortList="${cdnSelectedPortList}${result[-1]},"
         echoContent green "\n ---> VMess_ws端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -4874,6 +4883,7 @@ EOF
         echoContent skyBlue "\n开始配置VMess+HTTPUpgrade协议端口"
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVMessHTTPUpgradePort}" cdn unique)
+        cdnSelectedPortList="${cdnSelectedPortList}${result[-1]},"
         echoContent green "\n ---> VMess_HTTPUpgrade端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -11352,6 +11362,170 @@ protocolNeedsPath() {
     fi
 }
 
+# CDN推荐协议
+protocolNeedsCDNPort() {
+    local core=$1
+    local type=$2
+    if [[ "${core}" == "1" ]]; then
+        echo " 1 3 " | grep -q " ${type} "
+    elif [[ "${core}" == "2" ]]; then
+        echo " 1 3 11 " | grep -q " ${type} "
+    else
+        return 1
+    fi
+}
+
+# 获取协议公网端口，格式: 端口 协议
+protocolPublicPorts() {
+    local core=$1
+    local type=$2
+    local configFile=
+    configFile=$(protocolConfigFile "${core}" "${type}")
+    if [[ "${core}" == "1" ]]; then
+        case ${type} in
+        0)
+            if [[ -f "${configPath}02_VLESS_TCP_inbounds.json" ]]; then
+                jq -r '.inbounds[0].port' "${configPath}02_VLESS_TCP_inbounds.json" | awk '{print $1" tcp"}'
+            fi
+            ;;
+        7)
+            if [[ -f "${configPath}07_VLESS_vision_reality_inbounds.json" ]]; then
+                jq -r '.inbounds[0].port' "${configPath}07_VLESS_vision_reality_inbounds.json" | awk '{print $1" tcp"}'
+            fi
+            ;;
+        12)
+            if [[ -f "${configPath}12_VLESS_XHTTP_inbounds.json" ]]; then
+                local port=
+                port=$(jq -r '.inbounds[0].port' "${configPath}12_VLESS_XHTTP_inbounds.json")
+                echo "${port} tcp"
+                echo "${port} udp"
+            fi
+            ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        if [[ "${type}" == "11" ]]; then
+            local port=
+            if [[ -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" ]]; then
+                port=$(grep 'listen' <"${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" | awk '{print $2}' | head -1)
+            fi
+            if [[ -z "${port}" || "${port}" == "null" ]]; then
+                port=${singBoxVMessHTTPUpgradePort}
+            fi
+            if [[ -n "${port}" && "${port}" != "null" ]]; then
+                echo "${port} tcp"
+                echo "${port} udp"
+            fi
+        elif [[ -f "${configFile}" ]]; then
+            local port=
+            port=$(jq -r '.inbounds[0].listen_port' "${configFile}")
+            if [[ -n "${port}" && "${port}" != "null" ]]; then
+                echo "${port} tcp"
+                echo "${port} udp"
+            fi
+        fi
+    fi
+}
+
+# 移除Xray前置回落
+removeXrayFallbackByDest() {
+    local dest=$1
+    local frontConfig="${configPath}02_VLESS_TCP_inbounds.json"
+    if [[ -f "${frontConfig}" ]]; then
+        local tmpConfig=
+        tmpConfig=$(mktemp)
+        if jq 'del(.inbounds[0].settings.fallbacks[] | select((.dest|tostring) == "'"${dest}"'"))' "${frontConfig}" >"${tmpConfig}"; then
+            mv "${tmpConfig}" "${frontConfig}"
+        else
+            rm -f "${tmpConfig}" >/dev/null 2>&1
+        fi
+    fi
+}
+
+# 协议附属配置清理
+removeProtocolExtraConfig() {
+    local core=$1
+    local type=$2
+    if [[ "${core}" == "1" ]]; then
+        case ${type} in
+        1)
+            removeXrayFallbackByDest 31297
+            ;;
+        3)
+            removeXrayFallbackByDest 31299
+            ;;
+        4)
+            removeXrayFallbackByDest 31296
+            ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case ${type} in
+        6)
+            readPortHopping "hysteria2" "${singBoxHysteria2Port}"
+            if [[ -n "${hysteria2PortHoppingStart}" && -n "${hysteria2PortHoppingEnd}" ]]; then
+                deletePortHoppingRules "hysteria2" "${hysteria2PortHoppingStart}" "${hysteria2PortHoppingEnd}" "${singBoxHysteria2Port}"
+                closePort "${hysteria2PortHoppingStart}:${hysteria2PortHoppingEnd}" udp
+            fi
+            ;;
+        9)
+            readPortHopping "tuic" "${singBoxTuicPort}"
+            if [[ -n "${tuicPortHoppingStart}" && -n "${tuicPortHoppingEnd}" ]]; then
+                deletePortHoppingRules "tuic" "${tuicPortHoppingStart}" "${tuicPortHoppingEnd}" "${singBoxTuicPort}"
+                closePort "${tuicPortHoppingStart}:${tuicPortHoppingEnd}" udp
+            fi
+            ;;
+        11)
+            rm -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
+            ;;
+        esac
+    fi
+}
+
+# 判断端口是否仍被脚本配置需要
+isProtocolPortRequired() {
+    local port=$1
+    local proto=$2
+    if [[ -z "${port}" || "${port}" == "null" ]]; then
+        return 1
+    fi
+    if [[ "${port}" == "443" ]]; then
+        return 0
+    fi
+    local requiredPorts=" ${currentPort} ${currentDefaultPort} ${customPort} ${xrayVLESSRealityPort} ${xrayVLESSRealityXHTTPort} ${singBoxVLESSVisionPort} ${singBoxVLESSWSPort} ${singBoxVMessWSPort} ${singBoxTrojanPort} ${singBoxHysteria2Port} ${singBoxVLESSRealityVisionPort} ${singBoxVLESSRealityGRPCPort} ${singBoxTuicPort} ${singBoxNaivePort} ${singBoxVMessHTTPUpgradePort} ${singBoxAnyTLSPort} ${singBoxSocks5Port} ${subscribePort} "
+    if echo "${requiredPorts}" | grep -q " ${port} "; then
+        return 0
+    fi
+    if [[ "${proto}" == "tcp" ]] && lsof -i "tcp:${port}" 2>/dev/null | grep -q LISTEN; then
+        return 0
+    fi
+
+    if [[ -n "${configPath}" ]]; then
+        local dokoPort=
+        while read -r dokoPort; do
+            if [[ "${dokoPort}" == "${port}" ]]; then
+                return 0
+            fi
+        done < <(find "${configPath}" -name "*dokodemodoor*" 2>/dev/null | while read -r dokoFile; do jq -r '.inbounds[0].port' "${dokoFile}" 2>/dev/null; done)
+    fi
+    return 1
+}
+
+# 关闭不再使用的协议端口
+closeProtocolPortsIfUnused() {
+    local port=
+    local proto=
+    while read -r port proto; do
+        if [[ -z "${port}" || -z "${proto}" ]]; then
+            continue
+        fi
+        if isProtocolPortRequired "${port}" "${proto}"; then
+            echoContent yellow " ---> 保留仍在使用的端口 ${port}/${proto}"
+        else
+            closePort "${port}" "${proto}"
+            echoContent green " ---> 已关闭不再使用的端口 ${port}/${proto}"
+        fi
+    done
+}
+
 # Xray WS/VMess/Trojan 依赖VLESS TCP前置，独立补装时自动补齐0
 xrayStandaloneInstallTypes() {
     local type=$1
@@ -11422,7 +11596,7 @@ prepareStandaloneProtocolInstall() {
         if protocolNeedsPath "${core}" "${type}"; then
             needPath=true
         fi
-        if [[ "${core}" == "1" ]] && echo " 1 3 5 11 " | grep -q " ${type} "; then
+        if protocolNeedsCDNPort "${core}" "${type}"; then
             needCdnPort=true
         fi
     done < <(echo "${typeList}" | tr ',' '\n')
@@ -11447,7 +11621,16 @@ prepareStandaloneProtocolInstall() {
     fi
 
     if [[ "${needCdnPort}" == "true" ]]; then
-        currentDefaultPort=$(selectCdnRecommendedPort "${currentDefaultPort:-443}" share)
+        if [[ "${core}" == "1" && -n "${currentDefaultPort}" ]]; then
+            port=${currentDefaultPort}
+        else
+            currentDefaultPort=$(selectCdnRecommendedPort "${currentDefaultPort:-2053}" share)
+            if [[ "${core}" == "1" ]]; then
+                port=${currentDefaultPort}
+            fi
+        fi
+    elif [[ "${core}" == "1" && -n "${currentDefaultPort}" ]]; then
+        port=${currentDefaultPort}
     fi
 
     lastInstallationConfig=true
@@ -11513,9 +11696,7 @@ removeProtocolConfig() {
     else
         echoContent yellow " ---> 未检测到 $(protocolName "${core}" "${type}") 配置"
     fi
-    if [[ "${core}" == "2" && "${type}" == "11" ]]; then
-        rm -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
-    fi
+    removeProtocolExtraConfig "${core}" "${type}"
 }
 
 # 协议补装/重装/卸载
@@ -11527,10 +11708,24 @@ handleStandaloneProtocols() {
         return 1
     fi
 
+    readInstallProtocolType
     echoContent yellow "当前核心：$([[ "${coreInstallType}" == "1" ]] && echo Xray-core || echo sing-box)"
     showProtocolListByCore "${coreInstallType}"
     read -r -p "请输入协议编号[可多选，英文逗号分隔]:" selectedProtocols
     selectedProtocols=$(normalizeProtocolSelection "${selectedProtocols}") || return 1
+
+    if [[ "${coreInstallType}" == "1" && "${action}" == "remove" ]] && echo "${selectedProtocols}" | grep -q ",0,"; then
+        local dependentProtocols=""
+        for type in 1 3 4; do
+            if echo "${currentInstallProtocolType}" | grep -q ",${type}," && ! echo "${selectedProtocols}" | grep -q ",${type},"; then
+                dependentProtocols="${dependentProtocols}$(protocolName "1" "${type}") "
+            fi
+        done
+        if [[ -n "${dependentProtocols}" ]]; then
+            echoContent red " ---> VLESS+TCP+TLS_Vision 是 ${dependentProtocols}的前置，请一并卸载相关协议或先保留前置"
+            return 1
+        fi
+    fi
 
     local type=
     local installTypes=""
@@ -11544,9 +11739,8 @@ handleStandaloneProtocols() {
             continue
         fi
         if [[ "${action}" == "remove" || "${action}" == "reinstall" ]]; then
-            if [[ "${coreInstallType}" == "2" && "${type}" == "11" ]]; then
-                cleanupPorts="${cleanupPorts}${singBoxVMessHTTPUpgradePort},"
-            fi
+            cleanupPorts="${cleanupPorts}$(protocolPublicPorts "${coreInstallType}" "${type}")
+"
             removeProtocolConfig "${coreInstallType}" "${type}"
         fi
         if [[ "${action}" == "install" || "${action}" == "reinstall" ]]; then
@@ -11564,12 +11758,9 @@ handleStandaloneProtocols() {
         readInstallProtocolType
         subscribe false
         if [[ -n "${cleanupPorts}" ]]; then
-            cleanupPorts=$(echo "${cleanupPorts}" | tr ',' '\n' | grep -v '^$' | awk '!seen[$0]++' | paste -sd ',')
-            for type in $(echo "${cleanupPorts}" | tr ',' ' '); do
-                if [[ -n "${type}" ]]; then
-                    closePort "${type}" tcp
-                fi
-            done
+            closeProtocolPortsIfUnused <<EOF
+${cleanupPorts}
+EOF
         fi
         echoContent green " ---> 协议卸载完成，订阅已更新"
         return 0
@@ -11586,6 +11777,12 @@ handleStandaloneProtocols() {
         installXrayProtocolStandalone "${installTypes}"
     else
         installSingBoxProtocolStandalone "${installTypes}"
+    fi
+
+    if [[ "${action}" == "reinstall" && -n "${cleanupPorts}" ]]; then
+        closeProtocolPortsIfUnused <<EOF
+${cleanupPorts}
+EOF
     fi
 }
 
