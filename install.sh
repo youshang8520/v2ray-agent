@@ -9189,9 +9189,11 @@ setSingBoxSocks5OutboundListRouting() {
             exit 0
         fi
     else
-        read -r -p "是否重新配置出站IP/端口？（直接回车跳过，仅刷新规则）[y/n]:" reconfigSocks5Status
-        if [[ "${reconfigSocks5Status}" == "y" ]]; then
-            setSocks5Outbound
+        if [[ "$1" != "noConfirm" ]]; then
+            read -r -p "是否重新配置出站IP/端口？（直接回车跳过，仅刷新规则）[y/n]:" reconfigSocks5Status
+            if [[ "${reconfigSocks5Status}" == "y" ]]; then
+                setSocks5Outbound
+            fi
         fi
     fi
 
