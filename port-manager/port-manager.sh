@@ -9,6 +9,7 @@ usage() {
 port-manager - firewall port helper
 
 Usage:
+  port-manager.sh                         Open interactive menu
   port-manager.sh list
   port-manager.sh check <port> [tcp|udp]
   port-manager.sh open <port> [tcp|udp]
@@ -243,9 +244,73 @@ cmd_free() {
     exit 1
 }
 
+menu() {
+    while true; do
+        echo ""
+        echo "========== port-manager v${VERSION} =========="
+        echo " 1. 查看监听端口 & 防火墙开放端口"
+        echo " 2. 检测指定端口"
+        echo " 3. 开放端口"
+        echo " 4. 关闭端口"
+        echo " 5. 扫描空闲但已开放的非保护端口"
+        echo " 6. 扫描并关闭空闲但已开放的非保护端口"
+        echo " 7. 查找可用空闲端口"
+        echo " 8. 查看保护端口列表"
+        echo " 0. 退出"
+        echo "==========================================="
+        read -r -p "请选择 [0-8]: " choice
+        echo ""
+        case "${choice}" in
+        1) cmd_list ;;
+        2)
+            read -r -p "端口号: " p
+            read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
+            cmd_check "${p}" "${pr}"
+            ;;
+        3)
+            need_root
+            read -r -p "端口号: " p
+            read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
+            open_port "${p}" "${pr}"
+            ;;
+        4)
+            need_root
+            read -r -p "端口号: " p
+            read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
+            if is_protected "${p}"; then
+                read -r -p "${p} 是保护端口，确认强制关闭？[y/N]: " confirm
+                [[ "${confirm}" == "y" || "${confirm}" == "Y" ]] && close_port "${p}" "${pr}" "--force" || log "已取消"
+            else
+                close_port "${p}" "${pr}"
+            fi
+            ;;
+        5) cmd_scan ;;
+        6)
+            need_root
+            read -r -p "确认关闭所有空闲已开放非保护端口？[y/N]: " confirm
+            [[ "${confirm}" == "y" || "${confirm}" == "Y" ]] && cmd_scan --close || log "已取消"
+            ;;
+        7)
+            read -r -p "起始端口 [20000]: " s; s=${s:-20000}
+            read -r -p "结束端口 [50000]: " e; e=${e:-50000}
+            read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
+            cmd_free "${s}" "${e}" "${pr}"
+            ;;
+        8) log "保护端口: $(protected_ports | paste -sd, -)"; ;;
+        0) exit 0 ;;
+        *) err "无效选项" ;;
+        esac
+    done
+}
+
 main() {
-    local cmd=${1:-help}
-    shift || true
+    if [[ $# -eq 0 ]]; then
+        need_root
+        menu
+        return
+    fi
+    local cmd=$1
+    shift
     case "${cmd}" in
     list) cmd_list ;;
     check) [[ $# -ge 1 ]] || { usage; exit 1; }; cmd_check "$@" ;;
