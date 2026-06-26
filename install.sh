@@ -11788,6 +11788,9 @@ EOF
 ${cleanupPorts}
 EOF
     fi
+
+    installCronTLS 1
+    checkGFWStatue 2
 }
 
 # 统一协议管理菜单
