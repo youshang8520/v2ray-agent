@@ -11801,15 +11801,19 @@ manageProtocols() {
     case ${protocolManageStatus} in
     1)
         showInstallStatus
+        manageProtocols
         ;;
     2)
         handleStandaloneProtocols install
+        manageProtocols
         ;;
     3)
         handleStandaloneProtocols reinstall
+        manageProtocols
         ;;
     4)
         handleStandaloneProtocols remove
+        manageProtocols
         ;;
     5)
         menu
