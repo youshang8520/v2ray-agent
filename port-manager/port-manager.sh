@@ -280,42 +280,47 @@ menu() {
         read -r -p "请选择 [0-8]: " choice
         echo ""
         case "${choice}" in
-        1) cmd_list ;;
+        1) ( cmd_list ) || true ;;
         2)
             read -r -p "端口号: " p
             read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
-            cmd_check "${p}" "${pr}"
+            ( cmd_check "${p}" "${pr}" ) || true
             ;;
         3)
-            need_root
             read -r -p "端口号: " p
             read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
-            open_port "${p}" "${pr}"
+            ( open_port "${p}" "${pr}" ) || true
             ;;
         4)
-            need_root
             read -r -p "端口号: " p
             read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
             if is_protected "${p}"; then
                 read -r -p "${p} 是保护端口，确认强制关闭？[y/N]: " confirm
-                [[ "${confirm}" == "y" || "${confirm}" == "Y" ]] && close_port "${p}" "${pr}" "--force" || log "已取消"
+                if [[ "${confirm}" == "y" || "${confirm}" == "Y" ]]; then
+                    ( close_port "${p}" "${pr}" "--force" ) || true
+                else
+                    log "已取消"
+                fi
             else
-                close_port "${p}" "${pr}"
+                ( close_port "${p}" "${pr}" ) || true
             fi
             ;;
-        5) cmd_scan ;;
+        5) ( cmd_scan ) || true ;;
         6)
-            need_root
             read -r -p "确认关闭所有空闲已开放非保护端口？[y/N]: " confirm
-            [[ "${confirm}" == "y" || "${confirm}" == "Y" ]] && cmd_scan --close || log "已取消"
+            if [[ "${confirm}" == "y" || "${confirm}" == "Y" ]]; then
+                ( cmd_scan --close ) || true
+            else
+                log "已取消"
+            fi
             ;;
         7)
             read -r -p "起始端口 [20000]: " s; s=${s:-20000}
             read -r -p "结束端口 [50000]: " e; e=${e:-50000}
             read -r -p "协议 [tcp]: " pr; pr=${pr:-tcp}
-            cmd_free "${s}" "${e}" "${pr}"
+            ( cmd_free "${s}" "${e}" "${pr}" ) || true
             ;;
-        8) log "保护端口: $(protected_ports | paste -sd, -)"; ;;
+        8) ( log "保护端口: $(protected_ports | paste -sd, -)" ) || true ;;
         0) exit 0 ;;
         *) err "无效选项" ;;
         esac
