@@ -60,6 +60,8 @@ firewall_backend() {
         echo firewalld
     elif command -v iptables >/dev/null 2>&1; then
         echo iptables
+    elif command -v nft >/dev/null 2>&1; then
+        echo nftables
     else
         echo none
     fi
@@ -118,7 +120,44 @@ listening_ports_with_procs() {
             }'
         fi
         proc_bound_ports | awk '{print $1" kernel"}'
-    } | sort -t/ -k1,1n -u
+    } | awk '
+        {
+            key=$1; proc=$2
+            if (proc=="") proc="unknown"
+            if (!(key in seen) || seen[key]=="kernel" || seen[key]=="unknown") seen[key]=proc
+        }
+        END {for (key in seen) print key, seen[key]}
+    ' | sort -t/ -k1,1n -u
+}
+
+port_process() {
+    local port=$1 proto=$2 key item proc result=""
+    key="${port}/${proto}"
+    while read -r item proc; do
+        [[ "${item}" == "${key}" ]] || continue
+        result=${proc:-unknown}
+        break
+    done < <(listening_ports_with_procs)
+    printf '%s\n' "${result}"
+}
+
+format_port_owner() {
+    local spec=$1 item port proto proc owners=""
+    while IFS=/ read -r item proto; do
+        [[ -n "${item}" && -n "${proto}" ]] || continue
+        [[ "${item}" == *-* ]] && continue
+        port=${item}
+        if port_spec_contains "${spec}" "${port}" "${proto}"; then
+            proc=$(port_process "${port}" "${proto}")
+            [[ -n "${proc}" ]] || proc="unknown"
+            owners="${owners}${owners:+, }${port}/${proto}:${proc}"
+        fi
+    done < <(listening_ports)
+    if [[ -n "${owners}" ]]; then
+        printf 'occupied: %s\n' "${owners}"
+    else
+        printf 'unused\n'
+    fi
 }
 
 ssh_ports() {
@@ -145,26 +184,60 @@ is_protected() {
     protected_ports | grep -qx "${port}"
 }
 
+firewall_ports_from_nft() {
+    command -v nft >/dev/null 2>&1 || return 0
+    nft list ruleset 2>/dev/null | awk '
+        /accept/ && /dport/ {
+            proto=""
+            for (i=1;i<=NF;i++) {
+                if ($i=="tcp" || $i=="udp") proto=$i
+                if ($i=="dport") {
+                    for (j=i+1;j<=NF;j++) {
+                        token=$j
+                        gsub(/[{},]/, "", token)
+                        gsub(/;/, "", token)
+                        if (token ~ /^[0-9]+$/ || token ~ /^[0-9]+-[0-9]+$/) print token"/"proto
+                        else if (token ~ /^[0-9]+-[0-9]+,$/) {gsub(/,/, "", token); print token"/"proto}
+                        if ($(j+1) !~ /^[0-9{},-]+$/ && $(j+1) != ",") break
+                    }
+                }
+            }
+        }'
+}
+
 firewall_ports() {
     local backend
     backend=$(firewall_backend)
     case "${backend}" in
     ufw)
-        ufw status | awk '/ALLOW/ {print $1}' | sed -E 's#^([0-9]+)(/(tcp|udp))?.*#\1/\3#' | awk -F/ '{proto=$2; if (proto=="") proto="tcp"; if ($1 ~ /^[0-9]+$/) print $1"/"proto}' | sort -u
+        {
+            ufw status | awk '/ALLOW/ {print $1}' | sed -E 's#^([0-9]+)(/(tcp|udp))?.*#\1/\3#' | awk -F/ '{proto=$2; if (proto=="") proto="tcp"; if ($1 ~ /^[0-9]+$/) print $1"/"proto}'
+            firewall_ports_from_nft
+        } | sort -u
         ;;
     firewalld)
-        firewall-cmd --list-ports | tr ' ' '\n' | grep -E '^[0-9]+(-[0-9]+)?/(tcp|udp)$' | sort -u
+        {
+            firewall-cmd --list-ports | tr ' ' '\n' | grep -E '^[0-9]+(-[0-9]+)?/(tcp|udp)$'
+            firewall_ports_from_nft
+        } | sort -u
         ;;
     iptables)
-        iptables -S INPUT | awk '
-            /-j ACCEPT/ {
-                proto="tcp";
-                for (i=1;i<=NF;i++) {
-                    if ($i=="-p") proto=$(i+1);
-                    if ($i=="--dport") port=$(i+1);
-                }
-                if (port ~ /^[0-9]+(:[0-9]+)?$/) { gsub(":","-",port); print port"/"proto; port="" }
-            }' | sort -u
+        {
+            iptables -S INPUT | awk '
+                /-j ACCEPT/ {
+                    proto="tcp"; port="";
+                    for (i=1;i<=NF;i++) {
+                        if ($i=="-p") proto=$(i+1);
+                        if ($i=="--dport" || $i=="--dports") port=$(i+1);
+                    }
+                    if (port ~ /^[0-9]+(:[0-9]+)?$/) { gsub(":","-",port); print port"/"proto; port="" }
+                    else if (port ~ /^[0-9]+(,[0-9]+)*$/) { n=split(port,a,","); for (k=1;k<=n;k++) print a[k]"/"proto; port="" }
+                }'
+            firewall_ports_from_nft
+        } | sort -u
+        ;;
+    nftables)
+        firewall_ports_from_nft | sort -u
         ;;
     esac
 }
@@ -247,7 +320,10 @@ cmd_list() {
     listening_ports_with_procs | awk '{printf "  %-16s %s\n", $1, $2}' || true
     log ""
     log "Firewall allowed ports:"
-    firewall_ports | sed 's/^/  /' || true
+    firewall_ports | while IFS= read -r item; do
+        [[ -n "${item}" ]] || continue
+        printf '  %-16s %s\n' "${item}" "$(format_port_owner "${item}")"
+    done || true
 }
 
 cmd_check() {
