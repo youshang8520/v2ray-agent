@@ -24,7 +24,7 @@ Commands:
   close     Close a firewall port. Protected ports are refused unless --force.
   scan      List allowed ports that are not listening and not protected.
             With --close, close those candidate rules.
-  free      Find the first non-listening port in a range. Default: 20000-50000/tcp.
+  free      Find the first non-listening and firewall-unallowed port in a range. Default: 20000-50000/tcp.
 
 Environment:
   PORT_MANAGER_PROTECT="22,80,443,2053"   Extra protected ports.
@@ -65,12 +65,34 @@ firewall_backend() {
     fi
 }
 
+proc_bound_ports() {
+    local spec file proto sl local_addr rem_addr state rest port_hex port_dec
+    for spec in /proc/net/tcp:tcp /proc/net/tcp6:tcp /proc/net/udp:udp /proc/net/udp6:udp; do
+        file=${spec%:*}
+        proto=${spec##*:}
+        [[ -r "${file}" ]] || continue
+        while read -r sl local_addr rem_addr state rest; do
+            [[ "${sl}" == "sl" ]] && continue
+            if [[ "${proto}" == "tcp" && "${state}" != "0A" ]]; then
+                continue
+            fi
+            port_hex=${local_addr##*:}
+            [[ "${port_hex}" =~ ^[0-9A-Fa-f]{4}$ ]] || continue
+            port_dec=$((16#${port_hex}))
+            (( port_dec > 0 )) && printf '%s/%s\n' "${port_dec}" "${proto}"
+        done <"${file}"
+    done | sort -u
+}
+
 listening_ports() {
-    if command -v ss >/dev/null 2>&1; then
-        ss -H -lntu | awk '{print $1, $5}' | sed -E 's/.*:([0-9]+)$/\1/' | awk '{print $2"/"$1}' | sort -u
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -lntu | awk 'NR>2 {print tolower($1), $4}' | sed -E 's/.*:([0-9]+)$/\1/' | awk '{print $2"/"$1}' | sort -u
-    fi
+    {
+        if command -v ss >/dev/null 2>&1; then
+            ss -H -lntu | awk '{print $1, $5}' | sed -E 's/.*:([0-9]+)$/\1/' | awk '{print $2"/"$1}'
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -lntu | awk 'NR>2 {print tolower($1), $4}' | sed -E 's/.*:([0-9]+)$/\1/' | awk '{print $2"/"$1}'
+        fi
+        proc_bound_ports
+    } | sort -u
 }
 
 is_listening() {
@@ -79,21 +101,24 @@ is_listening() {
 }
 
 listening_ports_with_procs() {
-    if command -v ss >/dev/null 2>&1; then
-        ss -H -lntup | awk '{
-            n = split($5, a, ":"); port = a[n]; proto = $1; proc = ""
-            for (i = 1; i <= NF; i++) if ($i ~ /users:/) {
-                s = $i; sub(/.*\(\("/, "", s); sub(/".*/, "", s); proc = s; break
-            }
-            if (port + 0 > 0) print port "/" proto " " proc
-        }' | sort -t/ -k1,1n -u
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -lntup 2>/dev/null | awk 'NR > 2 {
-            n = split($4, a, ":"); port = a[n]; proto = tolower($1)
-            split($NF, p, "/"); proc = (length(p) > 1) ? p[2] : ""
-            if (port + 0 > 0) print port "/" proto " " proc
-        }' | sort -t/ -k1,1n -u
-    fi
+    {
+        if command -v ss >/dev/null 2>&1; then
+            ss -H -lntup | awk '{
+                n = split($5, a, ":"); port = a[n]; proto = $1; proc = ""
+                for (i = 1; i <= NF; i++) if ($i ~ /users:/) {
+                    s = $i; sub(/.*\(\("/, "", s); sub(/".*/, "", s); proc = s; break
+                }
+                if (port + 0 > 0) print port "/" proto " " proc
+            }'
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -lntup 2>/dev/null | awk 'NR > 2 {
+                n = split($4, a, ":"); port = a[n]; proto = tolower($1)
+                split($NF, p, "/"); proc = (length(p) > 1) ? p[2] : ""
+                if (port + 0 > 0) print port "/" proto " " proc
+            }'
+        fi
+        proc_bound_ports | awk '{print $1" kernel"}'
+    } | sort -t/ -k1,1n -u
 }
 
 ssh_ports() {
@@ -144,9 +169,32 @@ firewall_ports() {
     esac
 }
 
+port_spec_contains() {
+    local spec=$1 port=$2 proto=$3 range p start end spec_proto
+    range=${spec%/*}
+    spec_proto=${spec##*/}
+    [[ "${spec_proto}" == "${proto}" ]] || return 1
+    if [[ "${range}" == *-* ]]; then
+        start=${range%-*}
+        end=${range#*-}
+        [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ ]] || return 1
+        (( port >= start && port <= end ))
+    else
+        p=${range}
+        [[ "${p}" =~ ^[0-9]+$ ]] || return 1
+        (( port == p ))
+    fi
+}
+
 is_allowed() {
-    local port=$1 proto=${2:-tcp}
-    firewall_ports | grep -Eq "^${port}(/|-)${proto}$|^${port}/${proto}$"
+    local port=$1 proto=${2:-tcp} item
+    while IFS= read -r item; do
+        [[ -n "${item}" ]] || continue
+        if port_spec_contains "${item}" "${port}" "${proto}"; then
+            return 0
+        fi
+    done < <(firewall_ports)
+    return 1
 }
 
 open_port() {
@@ -254,7 +302,7 @@ cmd_free() {
     valid_port "${end}" || { err "invalid end port"; exit 1; }
     valid_proto "${proto}" || { err "invalid proto: ${proto}"; exit 1; }
     for ((port=start; port<=end; port++)); do
-        if ! is_listening "${port}" "${proto}"; then
+        if ! is_listening "${port}" "${proto}" && ! is_allowed "${port}" "${proto}"; then
             echo "${port}"
             return 0
         fi
