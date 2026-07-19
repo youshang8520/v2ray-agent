@@ -8115,9 +8115,10 @@ manageSocks5MultiRoutingList() {
         fi
         ;;
     5)
+        normalizeSocks5RoutingListRuleNames "${listFile}"
         editSocks5RoutingListFile "${listFile}"
         normalizeSocks5RoutingListRuleNames "${listFile}"
-        echoContent green " ---> 编辑完成，已迁移旧清单格式，正在重新应用规则..."
+        echoContent green " ---> 已打开完整规则清单，编辑完成后正在重新应用规则..."
         refreshSocks5MultiOutboundRouting
         ;;
     6)
@@ -9689,9 +9690,10 @@ manageSingBoxSocks5RoutingList() {
         refreshSingBoxSocks5RoutingList
         ;;
     5)
+        normalizeSocks5RoutingListRuleNames "${listFile}"
         editSocks5RoutingListFile "${listFile}"
         normalizeSocks5RoutingListRuleNames "${listFile}"
-        echoContent green " ---> 编辑完成，已迁移旧清单格式，正在重新应用规则..."
+        echoContent green " ---> 已打开完整规则清单，编辑完成后正在重新应用规则..."
         refreshSingBoxSocks5RoutingList
         ;;
     6)

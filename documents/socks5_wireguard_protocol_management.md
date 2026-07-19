@@ -70,7 +70,7 @@ WireGuard/WARP 客户端继续使用自己的规则，与 V2 节点流量隔离�
 
 隐私清单文件为纯文本，一行一条规则，路径为 `/etc/v2ray-agent/socks5_vpngate_routing_list`。选择“追加清单”后，脚本先显示规则类型列表，再要求输入该类型的参数，并自动生成完整清单行；用户不需要手工输入 `DOMAIN-SUFFIX,` 或 `IP-CIDR,...,no-resolve` 前缀。参数会按规则类型校验，域名规则拒绝 IP/URL，IPv4/IPv6 CIDR 拒绝域名和错误地址，IP 规则自动补充固定参数 `no-resolve`。选择“替换清单”后同样逐条选择规则类型和参数，直到完成新清单。
 
-“使用编辑器维护清单”默认调用 `vim`，也可通过 `EDITOR` 环境变量指定其它编辑器。编辑器模式要求每条新增规则写完整前缀；例如域名使用 `DOMAIN-SUFFIX,example.com`，IPv4 网段使用 `IP-CIDR,192.0.2.0/24,no-resolve`，IPv6 网段使用 `IP-CIDR6,2001:db8::/32,no-resolve`。已有完整规则、`geosite:`、注释和空行会原样保留。编辑退出后脚本会迁移旧清单中的裸域名/IP为完整规则行，并自动重新应用规则。单独选择“重新应用规则”也会先执行同样的旧清单迁移，再生成最新 sing-box 配置。
+“使用编辑器维护清单”默认调用 `vim`，也可通过 `EDITOR` 环境变量指定其它编辑器。进入编辑器前，脚本会先把服务器上的旧裸域名/IP迁移为完整规则行，因此打开文件时应看到 `DOMAIN-SUFFIX,example.com`、`IP-CIDR,192.0.2.0/24,no-resolve` 等格式。编辑器模式中新增规则也必须写完整前缀；例如域名使用 `DOMAIN-SUFFIX,example.com`，IPv4 网段使用 `IP-CIDR,192.0.2.0/24,no-resolve`，IPv6 网段使用 `IP-CIDR6,2001:db8::/32,no-resolve`。编辑退出后脚本会再次检查并自动重新应用规则。单独选择“重新应用规则”也会先执行同样的旧清单迁移，再生成最新 sing-box 配置。
 
 ```bash
 EDITOR=vim vim /etc/v2ray-agent/socks5_vpngate_routing_list
