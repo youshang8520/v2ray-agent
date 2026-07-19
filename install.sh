@@ -8116,9 +8116,12 @@ manageSocks5MultiRoutingList() {
         ;;
     5)
         editSocks5RoutingListFile "${listFile}"
-        echoContent green " ---> 编辑完成；如需立即生效，请选择“重新应用规则”"
+        normalizeSocks5RoutingListRuleNames "${listFile}"
+        echoContent green " ---> 编辑完成，已迁移旧清单格式，正在重新应用规则..."
+        refreshSocks5MultiOutboundRouting
         ;;
     6)
+        normalizeSocks5RoutingListRuleNames "${listFile}"
         refreshSocks5MultiOutboundRouting
         ;;
     *)
@@ -8184,6 +8187,7 @@ setSocks5MultiOutboundRouting() {
             echoContent yellow " ---> ${alias} 清单不存在，跳过"
             continue
         fi
+        normalizeSocks5RoutingListRuleNames "${listFile}"
 
         local rules=
         local domainRules=
@@ -9057,6 +9061,31 @@ validateSocks5IPv6CIDR() {
     [[ "${address}" == *:* && "${address}" != *.* && "${address}" =~ ^[0-9a-f:]+$ && "${address}" != *::::* && "${address}" != ":" ]]
 }
 
+# 将旧版清单中的裸域名/IP参数迁移为显式规则行；已有完整规则保持不变
+normalizeSocks5RoutingListRuleNames() {
+    local listFile=$1
+    local tmpFile="${listFile}.normalized"
+    local line=
+    local normalizedLine=
+    [[ -f "${listFile}" ]] || return 0
+    : >"${tmpFile}"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        normalizedLine=$(printf '%s' "${line}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
+        if [[ -z "${normalizedLine}" || "${normalizedLine}" == \#* || "${normalizedLine}" == *,* || "${normalizedLine}" == geosite:* ]]; then
+            printf '%s\n' "${line}" >>"${tmpFile}"
+        elif isDomainFormat "${normalizedLine}"; then
+            printf 'DOMAIN-SUFFIX,%s\n' "${normalizedLine}" >>"${tmpFile}"
+        elif validateSocks5IPv4CIDR "${normalizedLine}"; then
+            printf 'IP-CIDR,%s,no-resolve\n' "${normalizedLine}" >>"${tmpFile}"
+        elif validateSocks5IPv6CIDR "${normalizedLine}"; then
+            printf 'IP-CIDR6,%s,no-resolve\n' "${normalizedLine}" >>"${tmpFile}"
+        else
+            printf '%s\n' "${line}" >>"${tmpFile}"
+        fi
+    done <"${listFile}"
+    mv "${tmpFile}" "${listFile}"
+}
+
 # 交互式追加一条规则；规则类型决定参数校验和最终清单格式
 appendSocks5RoutingRuleInteractive() {
     local listFile=$1
@@ -9199,6 +9228,13 @@ byteoversea.com
 ibytedtos.com
 ibyteimg.com
 EOF
+    local listFile=
+    listFile=$(singBoxSocks5RoutingListFile)
+    awk '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ || /,/ || /^geosite:/ { print; next }
+        /^[[:alnum:]][[:alnum:].-]*\.[[:alpha:]][[:alnum:].-]*$/ { print "DOMAIN-SUFFIX," $0; next }
+        { print }
+    ' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
 }
 
 # sing-box 默认直连出站，清单外使用VPS默认出口
@@ -9354,6 +9390,7 @@ setSingBoxSocks5OutboundListRouting() {
     if [[ ! -f "${listFile}" ]]; then
         writeDefaultSingBoxSocks5RoutingList
     fi
+    normalizeSocks5RoutingListRuleNames "${listFile}"
 
     echoContent red "=============================================================="
     echoContent yellow "# 注意事项"
@@ -9653,9 +9690,12 @@ manageSingBoxSocks5RoutingList() {
         ;;
     5)
         editSocks5RoutingListFile "${listFile}"
-        echoContent green " ---> 编辑完成；如需立即生效，请选择“重新应用规则”"
+        normalizeSocks5RoutingListRuleNames "${listFile}"
+        echoContent green " ---> 编辑完成，已迁移旧清单格式，正在重新应用规则..."
+        refreshSingBoxSocks5RoutingList
         ;;
     6)
+        normalizeSocks5RoutingListRuleNames "${listFile}"
         refreshSingBoxSocks5RoutingList
         ;;
     *)

@@ -55,6 +55,23 @@
 - 改动文件：`install.sh`（交互式规则选择、校验、自动补全和菜单流程）、`documents/socks5_wireguard_protocol_management.md`（交互说明）、`dev-progress.md`（本轮记录）。
 - 回滚方式：恢复本轮三个文件；运行时恢复原清单备份后重新执行 Socks5 规则刷新。
 
+## 2026-07-19 - 任务：默认清单与编辑器统一使用完整规则行
+
+### What was done
+- 默认清单生成后会将裸域名转换为显式 `DOMAIN-SUFFIX,<domain>` 行，避免默认文件出现无规则名称的参数。
+- 编辑器维护不再自动猜测或转换裸参数；编辑器中新增规则需要直接写完整规则前缀。
+- 追加/替换菜单仍通过规则类型选择生成完整行，编辑完成后选择“重新应用规则”使 sing-box 重新生成配置。
+- 编辑器退出和“重新应用规则”都会先迁移服务器上的旧裸域名/IP清单；多 Socks5 刷新时也会对每个代理清单执行同样迁移。
+
+### Testing
+- `wsl.exe bash -n /mnt/c/Users/guolei/Documents/v2ray-agent-fork/install.sh` 通过，退出码为 `0`。
+- 静态确认默认清单生成函数在 heredoc 完成后将裸域名写成 `DOMAIN-SUFFIX`，编辑器函数仅负责打开文件。
+- `wsl.exe bash -n /mnt/c/Users/guolei/Documents/v2ray-agent-fork/install.sh` 再次通过，退出码为 `0`；选项 5/6 和多 Socks5 刷新均包含旧清单迁移调用。
+
+### Notes
+- 改动文件：`install.sh`（默认清单完整规则行转换、编辑器行为）、`documents/socks5_wireguard_protocol_management.md`（编辑器完整规则要求）、`dev-progress.md`（本轮记录）。
+- 回滚方式：恢复本轮文件；已有清单可从编辑前备份恢复。
+
 ## 2026-06-27
 
 ### 当前任务：Aimili/VPNGate 增加 PublicVPNList 来源
