@@ -8078,6 +8078,8 @@ manageSocks5MultiRoutingList() {
     echoContent yellow "2.追加清单（自动刷新规则）"
     echoContent yellow "3.替换清单（自动刷新规则）"
     echoContent yellow "4.清空清单（自动刷新规则）"
+    echoContent yellow "5.使用编辑器维护清单"
+    echoContent yellow "6.重新应用规则"
     read -r -p "请选择:" listManageStatus
 
     case ${listManageStatus} in
@@ -8086,25 +8088,21 @@ manageSocks5MultiRoutingList() {
         grep -v '^#' "${listFile}" | grep -v '^$' || true
         ;;
     2)
-        echoContent yellow "请输入要追加的域名/IP/CIDR/geosite，多个用英文逗号分隔"
-        read -r -p "清单:" appendList
-        if [[ -z "${appendList}" ]]; then
-            echoContent red " ---> 清单不可为空"
-            return 1
-        fi
-        echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
-        awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
+        appendSocks5RoutingRuleInteractive "${listFile}" || return 1
         echoContent green " ---> 追加完成，规则已自动刷新"
         refreshSocks5MultiOutboundRouting
         ;;
     3)
-        echoContent yellow "请输入新的完整清单，多个用英文逗号分隔，会覆盖旧清单"
-        read -r -p "清单:" replaceList
-        if [[ -z "${replaceList}" ]]; then
-            echoContent red " ---> 清单不可为空"
-            return 1
-        fi
-        echo "${replaceList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >"${listFile}"
+        echoContent yellow "替换会清空当前清单，然后逐条选择规则类型并输入参数"
+        read -r -p "是否确认替换？[y/n]:" replaceStatus
+        [[ "${replaceStatus}" == "y" ]] || return 0
+        : >"${listFile}.replace"
+        while true; do
+            appendSocks5RoutingRuleInteractive "${listFile}.replace" || { rm -f "${listFile}.replace"; return 1; }
+            read -r -p "继续添加下一条？[y/n，默认 n]:" continueStatus
+            [[ "${continueStatus}" == "y" ]] || break
+        done
+        mv "${listFile}.replace" "${listFile}"
         echoContent green " ---> 替换完成，规则已自动刷新"
         refreshSocks5MultiOutboundRouting
         ;;
@@ -8115,6 +8113,13 @@ manageSocks5MultiRoutingList() {
             echoContent green " ---> 已清空，规则已自动刷新"
             refreshSocks5MultiOutboundRouting
         fi
+        ;;
+    5)
+        editSocks5RoutingListFile "${listFile}"
+        echoContent green " ---> 编辑完成；如需立即生效，请选择“重新应用规则”"
+        ;;
+    6)
+        refreshSocks5MultiOutboundRouting
         ;;
     *)
         echoContent red " ---> 选择错误"
@@ -8183,17 +8188,21 @@ setSocks5MultiOutboundRouting() {
         local rules=
         local domainRules=
         local domainSuffix=
+        local domainKeyword=
+        local domains=
         local ruleSet=
         local ruleSetTag=
         local ipCidrs=
         rules=$(buildSingBoxSocks5RoutingListRule "${listFile}" "socks5_multi_${alias}")
         domainRules=$(echo "${rules}" | jq .domainRules)
         domainSuffix=$(echo "${rules}" | jq .domainSuffix)
+        domainKeyword=$(echo "${rules}" | jq .domainKeyword)
+        domains=$(echo "${rules}" | jq .domains)
         ruleSet=$(echo "${rules}" | jq .ruleSet)
         ruleSetTag=$(echo "${rules}" | jq .ruleSetTag)
         ipCidrs=$(echo "${rules}" | jq .ipCidrs)
 
-        if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
+        if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${domainKeyword}" | jq '.|length')" == "0" && "$(echo "${domains}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
             echoContent yellow " ---> ${alias} 清单为空，跳过"
             continue
         fi
@@ -8204,6 +8213,12 @@ setSocks5MultiOutboundRouting() {
         fi
         if [[ "$(echo "${domainSuffix}" | jq '.|length')" != "0" ]]; then
             childRules=$(jq -n --argjson current "${childRules}" --argjson item "${domainSuffix}" '$current + [{"domain_suffix":$item}]')
+        fi
+        if [[ "$(echo "${domainKeyword}" | jq '.|length')" != "0" ]]; then
+            childRules=$(jq -n --argjson current "${childRules}" --argjson item "${domainKeyword}" '$current + [{"domain_keyword":$item}]')
+        fi
+        if [[ "$(echo "${domains}" | jq '.|length')" != "0" ]]; then
+            childRules=$(jq -n --argjson current "${childRules}" --argjson item "${domains}" '$current + [{"domain":$item}]')
         fi
         if [[ "$(echo "${domainRules}" | jq '.|length')" != "0" ]]; then
             childRules=$(jq -n --argjson current "${childRules}" --argjson item "${domainRules}" '$current + [{"domain_regex":$item}]')
@@ -9010,10 +9025,105 @@ singBoxSocks5RoutingListFile() {
     echo "/etc/v2ray-agent/socks5_vpngate_routing_list"
 }
 
+# 使用外部编辑器直接维护 Socks5 清单；退出编辑器后由调用方决定是否刷新规则
+editSocks5RoutingListFile() {
+    local listFile=$1
+    "${EDITOR:-vim}" "${listFile}"
+}
+
+# 校验 IPv4 CIDR，拒绝域名或不完整地址
+validateSocks5IPv4CIDR() {
+    local value=$1
+    local address=${value%/*}
+    local prefix=${value#*/}
+    local octet=
+    local count=0
+    [[ "${value}" == */* && "${prefix}" =~ ^[0-9]+$ && ${prefix} -ge 0 && ${prefix} -le 32 ]] || return 1
+    IFS=. read -r -a octets <<<"${address}"
+    [[ "${#octets[@]}" == "4" ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "${octet}" =~ ^[0-9]{1,3}$ && ${octet} -ge 0 && ${octet} -le 255 ]] || return 1
+        count=$((count + 1))
+    done
+    [[ "${count}" == "4" ]]
+}
+
+# 校验 IPv6 CIDR 的十六进制地址形态与前缀范围
+validateSocks5IPv6CIDR() {
+    local value=$1
+    local address=${value%/*}
+    local prefix=${value#*/}
+    [[ "${value}" == */* && "${prefix}" =~ ^[0-9]+$ && ${prefix} -ge 0 && ${prefix} -le 128 ]] || return 1
+    [[ "${address}" == *:* && "${address}" != *.* && "${address}" =~ ^[0-9a-f:]+$ && "${address}" != *::::* && "${address}" != ":" ]]
+}
+
+# 交互式追加一条规则；规则类型决定参数校验和最终清单格式
+appendSocks5RoutingRuleInteractive() {
+    local listFile=$1
+    local ruleType=
+    local ruleValue=
+    local ruleLine=
+    echoContent yellow "请选择要追加的规则类型"
+    echoContent yellow "1. DOMAIN-SUFFIX（域名后缀）"
+    echoContent yellow "2. DOMAIN-KEYWORD（域名关键词）"
+    echoContent yellow "3. DOMAIN（完整域名）"
+    echoContent yellow "4. DOMAIN-REGEX（域名正则）"
+    echoContent yellow "5. IP-CIDR（IPv4网段）"
+    echoContent yellow "6. IP-CIDR6（IPv6网段）"
+    echoContent yellow "7. GEOSITE（geosite名称）"
+    read -r -p "规则类型:" ruleType
+    read -r -p "规则参数:" ruleValue
+    ruleValue=$(echo "${ruleValue}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -n "${ruleValue}" ]] || { echoContent red " ---> 规则参数不可为空"; return 1; }
+
+    case "${ruleType}" in
+    1)
+        isDomainFormat "${ruleValue}" || { echoContent red " ---> DOMAIN-SUFFIX 需要合法域名，不能填写 IP 或 URL"; return 1; }
+        ruleLine="DOMAIN-SUFFIX,${ruleValue}"
+        ;;
+    2)
+        ruleValue=$(echo "${ruleValue}" | tr '[:upper:]' '[:lower:]')
+        [[ "${ruleValue}" != *,* && "${ruleValue}" != *[[:space:]]* ]] || { echoContent red " ---> DOMAIN-KEYWORD 只能填写单个关键词"; return 1; }
+        ruleLine="DOMAIN-KEYWORD,${ruleValue}"
+        ;;
+    3)
+        ruleValue=$(echo "${ruleValue}" | tr '[:upper:]' '[:lower:]')
+        isDomainFormat "${ruleValue}" || { echoContent red " ---> DOMAIN 需要合法域名，不能填写 IP 或 URL"; return 1; }
+        ruleLine="DOMAIN,${ruleValue}"
+        ;;
+    4)
+        ruleLine="DOMAIN-REGEX,${ruleValue}"
+        ;;
+    5)
+        ruleValue=$(echo "${ruleValue}" | tr '[:upper:]' '[:lower:]')
+        validateSocks5IPv4CIDR "${ruleValue}" || { echoContent red " ---> IP-CIDR 需要 IPv4 CIDR，例如 192.0.2.0/24"; return 1; }
+        ruleLine="IP-CIDR,${ruleValue},no-resolve"
+        ;;
+    6)
+        ruleValue=$(echo "${ruleValue}" | tr '[:upper:]' '[:lower:]')
+        validateSocks5IPv6CIDR "${ruleValue}" || { echoContent red " ---> IP-CIDR6 需要 IPv6 CIDR，例如 2001:db8::/32"; return 1; }
+        ruleLine="IP-CIDR6,${ruleValue},no-resolve"
+        ;;
+    7)
+        ruleValue=$(echo "${ruleValue}" | tr '[:upper:]' '[:lower:]')
+        [[ "${ruleValue}" =~ ^[a-z0-9_-]+$ ]] || { echoContent red " ---> GEOSITE 名称只能包含字母、数字、下划线和短横线"; return 1; }
+        ruleLine="geosite:${ruleValue}"
+        ;;
+    *)
+        echoContent red " ---> 规则类型选择错误"
+        return 1
+        ;;
+    esac
+
+    printf '%s\n' "${ruleLine}" >>"${listFile}"
+    awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
+    echoContent green " ---> 已追加：${ruleLine}"
+}
+
 # 写入默认Socks5隐私清单，清单内域名/IP会强制走Socks5出站
 writeDefaultSingBoxSocks5RoutingList() {
     cat <<EOF >"$(singBoxSocks5RoutingListFile)"
-# Socks5 隐私清单，一行一个；支持域名、geosite:名称、IPv4/IPv6 CIDR
+# Socks5 隐私清单，一行一个；支持普通域名、Clash DOMAIN-* / IP-CIDR*、geosite:名称
 # 清单内 -> 强制 socks5_outbound，不受 direct/IPv6 兜底影响
 # 清单外 -> 01_direct_outbound，使用 VPS 默认出口
 # AI / 账号风控 / IP质量敏感
@@ -9135,6 +9245,8 @@ buildSingBoxSocks5RoutingListRule() {
     local routingName="${2:-socks5_vpngate_list}"
     local domainRules=[]
     local domainSuffix=[]
+    local domainKeyword=[]
+    local domains=[]
     local ruleSet=[]
     local ruleSetTag=[]
     local ipCidrs=[]
@@ -9145,6 +9257,46 @@ buildSingBoxSocks5RoutingListRule() {
         if [[ -z "${normalizedLine}" ]]; then
             continue
         fi
+
+        local ruleType=
+        local ruleValue=
+        if echo "${normalizedLine}" | grep -Eq '^(domain-suffix|domain-keyword|domain|domain-regex|ip-cidr6?|geosite)[,:]'; then
+            ruleType=$(echo "${normalizedLine}" | sed -E 's/^([^,:]+).*/\1/')
+            ruleValue=${normalizedLine#*,}
+            [[ "${ruleValue}" == "${normalizedLine}" ]] && ruleValue=${normalizedLine#*:}
+            if [[ "${ruleType}" != "domain-regex" ]]; then
+                ruleValue=$(echo "${ruleValue}" | cut -d ',' -f 1)
+            fi
+            ruleValue=$(echo "${ruleValue}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        fi
+
+        case "${ruleType}" in
+        geosite)
+            local ruleName="${ruleValue}"
+            ruleSet=$(echo "${ruleSet}" | jq -r --arg name "${ruleName}" --arg routing "${routingName}" '. += [{"tag":($name+"_"+$routing),"type":"remote","format":"binary","url":("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-"+$name+".srs"),"download_detour":"01_direct_outbound"}]')
+            continue
+            ;;
+        domain-suffix)
+            domainSuffix=$(echo "${domainSuffix}" | jq -r --arg domain "${ruleValue}" '. += [$domain]')
+            continue
+            ;;
+        domain-keyword)
+            domainKeyword=$(echo "${domainKeyword}" | jq -r --arg keyword "${ruleValue}" '. += [$keyword]')
+            continue
+            ;;
+        domain)
+            domains=$(echo "${domains}" | jq -r --arg domain "${ruleValue}" '. += [$domain]')
+            continue
+            ;;
+        domain-regex)
+            domainRules=$(echo "${domainRules}" | jq -r --arg regex "${ruleValue}" '. += [$regex]')
+            continue
+            ;;
+        ip-cidr|ip-cidr6)
+            ipCidrs=$(echo "${ipCidrs}" | jq -r --arg cidr "${ruleValue}" '. += [$cidr]')
+            continue
+            ;;
+        esac
 
         if echo "${normalizedLine}" | grep -q '^geosite:'; then
             local ruleName=
@@ -9168,7 +9320,7 @@ buildSingBoxSocks5RoutingListRule() {
     if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
         ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
     fi
-    echo "{\"domainRules\":${domainRules},\"domainSuffix\":${domainSuffix},\"ruleSet\":${ruleSet},\"ruleSetTag\":${ruleSetTag},\"ipCidrs\":${ipCidrs}}"
+    echo "{\"domainRules\":${domainRules},\"domainSuffix\":${domainSuffix},\"domainKeyword\":${domainKeyword},\"domains\":${domains},\"ruleSet\":${ruleSet},\"ruleSetTag\":${ruleSetTag},\"ipCidrs\":${ipCidrs}}"
 }
 
 # sing-box Socks5隐私清单：仅作用于V2节点入站，清单内走Socks5，清单外走VPS服务器IP
@@ -9231,16 +9383,20 @@ setSingBoxSocks5OutboundListRouting() {
     rules=$(buildSingBoxSocks5RoutingListRule "${listFile}")
     local domainRules=
     local domainSuffix=
+    local domainKeyword=
+    local domains=
     local ruleSet=
     local ruleSetTag=
     local ipCidrs=
     domainRules=$(echo "${rules}" | jq .domainRules)
     domainSuffix=$(echo "${rules}" | jq .domainSuffix)
+    domainKeyword=$(echo "${rules}" | jq .domainKeyword)
+    domains=$(echo "${rules}" | jq .domains)
     ruleSet=$(echo "${rules}" | jq .ruleSet)
     ruleSetTag=$(echo "${rules}" | jq .ruleSetTag)
     ipCidrs=$(echo "${rules}" | jq .ipCidrs)
 
-    if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
+    if [[ "$(echo "${domainRules}" | jq '.|length')" == "0" && "$(echo "${domainSuffix}" | jq '.|length')" == "0" && "$(echo "${domainKeyword}" | jq '.|length')" == "0" && "$(echo "${domains}" | jq '.|length')" == "0" && "$(echo "${ruleSetTag}" | jq '.|length')" == "0" && "$(echo "${ipCidrs}" | jq '.|length')" == "0" ]]; then
         echoContent red " ---> 清单为空，请先维护清单"
         exit 0
     fi
@@ -9308,6 +9464,12 @@ setSingBoxSocks5OutboundListRouting() {
                 "domain_suffix": ${domainSuffix}
               },
               {
+                "domain_keyword": ${domainKeyword}
+              },
+              {
+                "domain": ${domains}
+              },
+              {
                 "domain_regex": ${domainRules}
               },
               {
@@ -9332,6 +9494,8 @@ EOF
         walk(if type == "object" then
             (if .rule_set? == [] then del(.rule_set) else . end)
             | (if .domain_suffix? == [] then del(.domain_suffix) else . end)
+            | (if .domain_keyword? == [] then del(.domain_keyword) else . end)
+            | (if .domain? == [] then del(.domain) else . end)
             | (if .domain_regex? == [] then del(.domain_regex) else . end)
             | (if .ip_cidr? == [] then del(.ip_cidr) else . end)
         else . end)
@@ -9454,6 +9618,8 @@ manageSingBoxSocks5RoutingList() {
     echoContent yellow "2.追加清单"
     echoContent yellow "3.替换清单"
     echoContent yellow "4.重置默认清单（并自动刷新规则）"
+    echoContent yellow "5.使用编辑器维护清单"
+    echoContent yellow "6.重新应用规则"
     read -r -p "请选择:" listManageStatus
 
     case ${listManageStatus} in
@@ -9462,31 +9628,34 @@ manageSingBoxSocks5RoutingList() {
         grep -v '^#' "${listFile}" | grep -v '^$' || true
         ;;
     2)
-        echoContent yellow "请输入要追加的域名/IP/CIDR，多个用英文逗号分隔"
-        read -r -p "清单:" appendList
-        if [[ -z "${appendList}" ]]; then
-            echoContent red " ---> 清单不可为空"
-            exit 0
-        fi
-        echo "${appendList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >>"${listFile}"
-        awk '!seen[$0]++' "${listFile}" >"${listFile}.tmp" && mv "${listFile}.tmp" "${listFile}"
+        appendSocks5RoutingRuleInteractive "${listFile}" || exit 0
         echoContent green " ---> 追加完成，规则已自动刷新"
         refreshSingBoxSocks5RoutingList
         ;;
     3)
-        echoContent yellow "请输入新的完整清单，多个用英文逗号分隔，会覆盖旧清单"
-        read -r -p "清单:" replaceList
-        if [[ -z "${replaceList}" ]]; then
-            echoContent red " ---> 清单不可为空"
-            exit 0
-        fi
-        echo "${replaceList}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >"${listFile}"
+        echoContent yellow "替换会清空当前清单，然后逐条选择规则类型并输入参数"
+        read -r -p "是否确认替换？[y/n]:" replaceStatus
+        [[ "${replaceStatus}" == "y" ]] || exit 0
+        : >"${listFile}.replace"
+        while true; do
+            appendSocks5RoutingRuleInteractive "${listFile}.replace" || { rm -f "${listFile}.replace"; exit 0; }
+            read -r -p "继续添加下一条？[y/n，默认 n]:" continueStatus
+            [[ "${continueStatus}" == "y" ]] || break
+        done
+        mv "${listFile}.replace" "${listFile}"
         echoContent green " ---> 替换完成"
         refreshSingBoxSocks5RoutingList
         ;;
     4)
         writeDefaultSingBoxSocks5RoutingList
         echoContent green " ---> 已重置默认清单，正在刷新规则..."
+        refreshSingBoxSocks5RoutingList
+        ;;
+    5)
+        editSocks5RoutingListFile "${listFile}"
+        echoContent green " ---> 编辑完成；如需立即生效，请选择“重新应用规则”"
+        ;;
+    6)
         refreshSingBoxSocks5RoutingList
         ;;
     *)

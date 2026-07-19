@@ -64,7 +64,34 @@ WireGuard/WARP 客户端继续使用自己的规则，与 V2 节点流量隔离�
 2. 追加清单（自动刷新规则）
 3. 替换清单（自动刷新规则）
 4. 重置默认清单（自动刷新规则）
+5. 使用编辑器维护清单
+6. 重新应用规则
 ```
+
+隐私清单文件为纯文本，一行一条规则，路径为 `/etc/v2ray-agent/socks5_vpngate_routing_list`。选择“追加清单”后，脚本先显示规则类型列表，再要求输入该类型的参数，并自动生成完整清单行；用户不需要手工输入 `DOMAIN-SUFFIX,` 或 `IP-CIDR,...,no-resolve` 前缀。参数会按规则类型校验，域名规则拒绝 IP/URL，IPv4/IPv6 CIDR 拒绝域名和错误地址，IP 规则自动补充固定参数 `no-resolve`。选择“替换清单”后同样逐条选择规则类型和参数，直到完成新清单。
+
+“使用编辑器维护清单”默认调用 `vim`，也可通过 `EDITOR` 环境变量指定其它编辑器。编辑完成后选择“重新应用规则”，脚本会重新解析文件并重载 sing-box；该入口适合批量调整已有清单或录入高级格式。
+
+```bash
+EDITOR=vim vim /etc/v2ray-agent/socks5_vpngate_routing_list
+# 编辑保存后
+/path/to/install.sh
+# 在 Socks5 分流菜单中选择“重新应用规则”
+```
+
+支持的清单行格式包括：普通域名（按 `domain_suffix` 处理）、`DOMAIN-SUFFIX,example.com`、`DOMAIN-KEYWORD,keyword`、`DOMAIN,example.com`、`DOMAIN-REGEX,^...$`、`IP-CIDR,192.0.2.0/24`、`IP-CIDR6,2001:db8::/32` 以及 `geosite:category-name`。
+
+追加菜单中的规则选择与生成结果示例如下：
+
+```text
+选择 `DOMAIN-SUFFIX`，参数 `example.com`，生成 `DOMAIN-SUFFIX,example.com`。
+选择 `DOMAIN-KEYWORD`，参数 `stream`，生成 `DOMAIN-KEYWORD,stream`。
+选择 `DOMAIN`，参数 `login.example.com`，生成 `DOMAIN,login.example.com`。
+选择 `IP-CIDR`，参数 `192.0.2.0/24`，生成 `IP-CIDR,192.0.2.0/24,no-resolve`。
+选择 `IP-CIDR6`，参数 `2001:db8::/32`，生成 `IP-CIDR6,2001:db8::/32,no-resolve`。
+```
+
+`no-resolve` 会保留在原始清单行中。sing-box 的 `ip_cidr` 本身按 IP/CIDR 匹配，不会对 CIDR 进行域名解析，因此生成 sing-box JSON 时不需要额外的 `no-resolve` 字段；刷新后该规则仍然按 IP/CIDR 生效。追加/替换菜单由脚本生成标准 Clash 行；编辑器入口才需要手工维护完整行。
 
 路由行为：
 
@@ -113,6 +140,8 @@ WireGuard/WARP -> 保持自身配置
 2. 追加清单（自动刷新规则）
 3. 替换清单（自动刷新规则）
 4. 清空清单（自动刷新规则）
+5. 使用编辑器维护清单
+6. 重新应用规则
 ```
 
 每个 Socks5 代理有独立清单：
@@ -120,6 +149,8 @@ WireGuard/WARP -> 保持自身配置
 ```text
 /etc/v2ray-agent/socks5_routing_lists/<alias>.list
 ```
+
+多 Socks5 清单也支持通过维护菜单中的“使用编辑器维护清单”直接修改现有条目；手工编辑路径为 `/etc/v2ray-agent/socks5_routing_lists/<alias>.list`，保存后选择“重新应用规则”。
 
 索引文件：
 
